@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.imkath/gmail-tidy-mcp",
-  "description": "Read and organize several Gmail accounts (labels, filters, archiving, drafts). Never sends or deletes mail.",
+  "description": "Organize several Gmail accounts: labels, filters, archiving, drafts. Never sends or deletes mail.",
   "repository": {
     "url": "https://github.com/imkath/gmail-tidy-mcp",
     "source": "github"
