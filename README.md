@@ -1,5 +1,10 @@
 # gmail-tidy-mcp
 
+[![npm](https://img.shields.io/npm/v/gmail-tidy-mcp)](https://www.npmjs.com/package/gmail-tidy-mcp)
+[![test](https://github.com/imkath/gmail-tidy-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/imkath/gmail-tidy-mcp/actions/workflows/test.yml)
+[![license](https://img.shields.io/github/license/imkath/gmail-tidy-mcp)](LICENSE)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.imkath%2Fgmail--tidy--mcp-blue)](https://registry.modelcontextprotocol.io/v0/servers?search=gmail-tidy-mcp)
+
 An MCP server that lets your AI assistant read and organize several Gmail accounts at once: search, read, label, archive, set up filters and write drafts.
 
 It cannot send or delete email. Not "it asks first": there is no tool for it, and a test fails the build if a send or delete call ever shows up in the code.
