@@ -1,0 +1,42 @@
+{
+  "name": "gmail-tidy-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that reads and organizes several Gmail accounts (labels, filters, archiving, drafts) and can never send or delete mail.",
+  "type": "module",
+  "bin": {
+    "gmail-tidy-mcp": "bin/gmail-tidy-mcp.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "googleapis": "185.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gmail",
+    "email",
+    "claude",
+    "labels",
+    "filters"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imkath/gmail-tidy-mcp.git"
+  },
+  "homepage": "https://github.com/imkath/gmail-tidy-mcp#readme",
+  "bugs": "https://github.com/imkath/gmail-tidy-mcp/issues",
+  "license": "MIT",
+  "author": "imkath"
+}
