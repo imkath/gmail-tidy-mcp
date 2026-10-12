@@ -68,21 +68,17 @@ Requires Node.js 22 or newer.
 
 When you connect an account, Google warns that the app is unverified. That is expected: the app is yours. Continue through **Advanced**.
 
-### 2. Install and register
-
-```bash
-git clone https://github.com/imkath/gmail-tidy-mcp.git
-cd gmail-tidy-mcp
-npm ci --ignore-scripts
-```
+### 2. Register it with your MCP client
 
 Claude Code:
 
 ```bash
-claude mcp add -s user gmail-tidy -- node "$PWD/bin/gmail-tidy-mcp.js"
+claude mcp add -s user gmail-tidy -- npx -y gmail-tidy-mcp
 ```
 
-Any other MCP client: run `node /path/to/gmail-tidy-mcp/bin/gmail-tidy-mcp.js` over stdio.
+Any other MCP client: run `npx -y gmail-tidy-mcp` over stdio.
+
+Prefer to run it from source? Clone the repo, run `npm ci --ignore-scripts`, and point your client at `node /path/to/gmail-tidy-mcp/bin/gmail-tidy-mcp.js`.
 
 On Linux, install `libsecret-tools` first so the key can go into your keyring.
 
@@ -91,9 +87,9 @@ On Linux, install `libsecret-tools` first so the key can go into your keyring.
 Ask your assistant to connect an account. It opens Google's sign-in page in your browser. Or do it from the terminal:
 
 ```bash
-node bin/gmail-tidy-mcp.js add you@gmail.com personal
-node bin/gmail-tidy-mcp.js list
-node bin/gmail-tidy-mcp.js remove you@gmail.com
+npx gmail-tidy-mcp add you@gmail.com personal
+npx gmail-tidy-mcp list
+npx gmail-tidy-mcp remove you@gmail.com
 ```
 
 Removing an account deletes its token locally. To revoke access on Google's side too, go to [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
