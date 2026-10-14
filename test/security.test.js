@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { deflateRawSync } from 'node:zlib';
 
 process.env.GMAIL_TIDY_DIR = '/nonexistent-gmail-tidy-test';
-const { attachmentRisks, baseDomain, injectionSignals, mailRisks, sniff, stripInvisible } = await import('../src/security.js');
+const { attachmentRisks, baseDomain, injectionSignals, lookalike, mailRisks, sniff, stripInvisible } = await import('../src/security.js');
 const { header, htmlToText } = await import('../src/gmail.js');
 
 const tags = (s) => [...s].map((c) => String.fromCodePoint(0xe0000 + c.codePointAt(0))).join('');
@@ -103,6 +103,9 @@ test('stays quiet on normal newsletters and platforms that send for others', () 
   }), []);
   assert.ok(mailRisks({ from: 'x <a@shop.example>', html: '<a href="http://192.0.2.7/login">login</a>', bulk: true }).some((w) => /IP address/.test(w)));
   assert.ok(mailRisks({ from: 'Bank <a@bank.example>', replyTo: 'bank.help@gmail.com' }).some((w) => /gmail\.com/.test(w)));
+  // A payment platform that passes DMARC may route replies to the shop's Gmail.
+  assert.deepEqual(mailRisks({ from: 'Pagos <info@pay.example>', replyTo: 'shop@gmail.com', authResults: 'spf=pass; dkim=pass; dmarc=pass' }), []);
+  assert.deepEqual(mailRisks({ from: 'Dev <a@app.example>', html: '<a href="http://127.0.0.1:54321/auth">confirm</a>' }), []);
 });
 
 test('judges the real destination inside Gmail and Outlook redirects', () => {
@@ -122,4 +125,19 @@ test('a clean message has no phishing warnings', () => {
   }), []);
   assert.equal(baseDomain('mail.banco.com.ar'), 'banco.com.ar');
   assert.equal(baseDomain('www.example.cl'), 'example.cl');
+});
+
+test('spots senders that imitate your own addresses', () => {
+  const own = ['hello@studio.example', 'ana.rojas.perez@gmail.com'];
+  assert.equal(lookalike('billing@studlo.example', own), 'studio.example');
+  assert.equal(lookalike('billing@studio-pay.example', own), null);
+  assert.equal(lookalike('hello@mail.studio.example', own), null);
+  assert.equal(lookalike('ana.rojas.peres@gmail.com', own), 'ana.rojas.perez@gmail.com');
+  assert.equal(lookalike('ana.rojas.perez@gmail.com', own), null);
+  assert.equal(lookalike('juan@gmail.com', own), null);
+  assert.equal(lookalike('ana.rojas.perez@gmail.com', [...own, 'ana.rojas.peres@gmail.com']), null);
+  const cyrillicA = String.fromCodePoint(0x430);
+  assert.equal(lookalike(`hello@studio.ex${cyrillicA}mple`, own), 'studio.example');
+  assert.ok(mailRisks({ from: 'Studio <hello@studlo.example>', own }).some((w) => /looks almost like your own studio\.example/.test(w)));
+  assert.ok(mailRisks({ from: `x <a@p${cyrillicA}y.example>` }).some((w) => /non-Latin/.test(w)));
 });

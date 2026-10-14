@@ -1,7 +1,7 @@
 {
   "name": "gmail-tidy-mcp",
   "mcpName": "io.github.imkath/gmail-tidy-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server that reads and organizes several Gmail accounts (labels, filters, archiving, drafts) and can never send or delete mail.",
   "type": "module",
   "bin": {

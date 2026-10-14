@@ -117,7 +117,9 @@ export function attachmentRisks(filename, bytes) {
 }
 
 function domainOf(address) {
-  return String(address).toLowerCase().match(/@([a-z0-9.-]+)/)?.[1] ?? '';
+  // Any characters up to the end of the address, so a domain with a non-Latin letter
+  // is read whole instead of being cut at that letter.
+  return String(address).toLowerCase().match(/@([^\s<>"';,]+)/)?.[1] ?? '';
 }
 
 // Registrable-ish domain: last two labels, or three for things like .co.uk / .com.ar.
@@ -145,16 +147,72 @@ export function unwrapLink(href) {
   }
 }
 
-// A link host that is a bare IP or a punycode lookalike (xn--) is suspicious anywhere.
+// A link to a public IP or to a punycode lookalike (xn--) is suspicious anywhere.
+// Loopback and private ranges are left alone: they show up in development mail.
 function oddHost(host) {
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /(^|\.)xn--/i.test(host);
+  if (/(^|\.)xn--/i.test(host)) return true;
+  const ip = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (!ip) return false;
+  const [a, b] = [Number(ip[1]), Number(ip[2])];
+  const local = a === 127 || a === 10 || a === 0 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+  return !local;
+}
+
+function distance(a, b) {
+  if (Math.abs(a.length - b.length) > 2) return 3;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+// Letters from other scripts that look Latin (Cyrillic a, e, o, p, c, x and so on, written
+// below as code points) are folded before comparing, so a domain that swaps one in
+// still matches the real one.
+const CONFUSABLE = { '\u{430}': 'a', '\u{435}': 'e', '\u{43E}': 'o', '\u{440}': 'p', '\u{441}': 'c', '\u{445}': 'x', '\u{443}': 'y',
+  '\u{456}': 'i', '\u{458}': 'j', '\u{4BB}': 'h', '\u{3BF}': 'o', '\u{3B1}': 'a', '0': 'o', '1': 'l' };
+function skeleton(text) {
+  return [...String(text).toLowerCase()].map((c) => CONFUSABLE[c] ?? c).join('').replace(/rn/g, 'm').replace(/vv/g, 'w');
+}
+
+// Is this sender pretending to be one of your own addresses? For custom domains
+// the domain is compared; for free webmail (gmail.com and so on) the mailbox name is.
+export function lookalike(address, own = []) {
+  const addr = String(address).toLowerCase();
+  const [local, domain] = addr.split('@');
+  const mineAll = own.map((o) => String(o).toLowerCase());
+  // Mail between your own accounts is never an imitation, however alike the names are.
+  if (!domain || mineAll.includes(addr)) return null;
+  for (const mine of mineAll) {
+    const [myLocal, myDomain] = mine.split('@');
+    if (!myDomain) continue;
+    if (!FREE_MAIL.has(myDomain)) {
+      if (domain === myDomain || domain.endsWith(`.${myDomain}`)) continue;
+      const near = distance(baseDomain(domain), baseDomain(myDomain)) <= 2 || skeleton(baseDomain(domain)) === skeleton(baseDomain(myDomain));
+      if (near) return myDomain;
+    } else if (domain === myDomain && local !== myLocal) {
+      if (myLocal.length >= 6 && (distance(local, myLocal) <= 2 || skeleton(local) === skeleton(myLocal))) return mine;
+    }
+  }
+  return null;
 }
 
 // Phishing signs from headers and from the HTML links. Tuned to stay quiet on normal
 // newsletters (tracking links, sending platforms) so a warning still means something.
-export function mailRisks({ from = '', replyTo = '', authResults = '', html = '', bulk = false }) {
+export function mailRisks({ from = '', replyTo = '', authResults = '', html = '', bulk = false, own = [] }) {
   const warnings = [];
-  const fromDomain = domainOf(from.match(/<([^>]+)>/)?.[1] ?? from);
+  const fromAddress = from.match(/<([^>]+)>/)?.[1] ?? from;
+  const fromDomain = domainOf(fromAddress);
+  if (/[^\x00-\x7f]/.test(fromDomain) || /(^|\.)xn--/.test(fromDomain)) {
+    warnings.push(`the sender's domain ${fromDomain} uses non-Latin or encoded characters, a way to imitate another domain`);
+  }
+  const imitated = lookalike(fromAddress.trim(), own);
+  if (imitated) warnings.push(`the sender (${fromAddress.trim().toLowerCase()}) looks almost like your own ${imitated}`);
 
   let authFailed = false;
   for (const check of ['spf', 'dkim', 'dmarc']) {
@@ -164,7 +222,10 @@ export function mailRisks({ from = '', replyTo = '', authResults = '', html = ''
       warnings.push(`${check.toUpperCase()} ${m[1].toLowerCase()}: the sender may be forged`);
     }
   }
-  if (replyTo) {
+  // When DMARC passes, the mail really comes from that domain, and where it routes
+  // replies is the sender's choice: Mercado Pago, for instance, points them at the shop.
+  const dmarcPassed = /\bdmarc=pass\b/i.test(authResults);
+  if (replyTo && !dmarcPassed) {
     const replyDomain = domainOf(replyTo);
     const differs = replyDomain && fromDomain && baseDomain(replyDomain) !== baseDomain(fromDomain);
     if (differs && (authFailed || (FREE_MAIL.has(replyDomain) && !FREE_MAIL.has(fromDomain)))) {

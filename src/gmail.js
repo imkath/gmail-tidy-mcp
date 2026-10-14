@@ -5,6 +5,7 @@
 import { google } from 'googleapis';
 import { authedClient, isTokenError } from './auth.js';
 import { injectionSignals, mailRisks, stripInvisible } from './security.js';
+import { listAccounts } from './store.js';
 
 const MAX_BODY = 40_000;
 const FORBIDDEN_LABELS = new Set(['TRASH', 'SPAM']);
@@ -141,6 +142,7 @@ export function getMessage(email, id) {
       authResults: header(h, 'Authentication-Results'),
       html: firstHtml(m.payload),
       bulk: Boolean(header(h, 'List-Unsubscribe') || header(h, 'List-Id')),
+      own: listAccounts().map((a) => a.email),
     });
     if (cleaned.tags) security.push(`${cleaned.tags} invisible "tag" characters were removed from the text: they are used to hide instructions for AI`);
     for (const why of injectionSignals(body)) security.push(`possible prompt injection: ${why}`);

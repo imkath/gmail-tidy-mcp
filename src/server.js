@@ -14,6 +14,7 @@ import {
 } from './gmail.js';
 import { DOWNLOADS, MAX_INLINE, readableText, saveFile } from './files.js';
 import { attachmentRisks, injectionSignals, stripInvisible } from './security.js';
+import { recentChanges, recordChange } from './audit.js';
 
 const SYSTEM_LABELS = ['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT', 'SPAM', 'TRASH', 'SENT', 'DRAFT',
   'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
@@ -167,6 +168,20 @@ const TOOLS = [
         top: { type: 'number', description: 'Rows to show (default 25)' },
       },
       required: ['account'],
+    },
+  },
+  {
+    name: 'recent_changes',
+    annotations: READ,
+    description:
+      'Shows the latest changes this server made (labels, archiving, filters, drafts, signature, saved files), ' +
+      'newest last. Use it to review or undo what happened in a session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Only this account (optional)' },
+        limit: { type: 'number', description: 'How many (default 20, max 500)' },
+      },
     },
   },
   { name: 'list_labels',
@@ -353,6 +368,12 @@ async function call(name, rawArgs) {
           .join('\n')
       );
     }
+    case 'recent_changes': {
+      const acc = str(args.account, 'account', { optional: true });
+      const rows = recentChanges(args.limit, acc ? resolveAccount(acc) : undefined);
+      if (!rows.length) return 'No changes recorded yet.';
+      return rows.map((r) => `${r.time}  ${r.tool}  ${JSON.stringify(r.args)}\n    -> ${r.result}`).join('\n');
+    }
     case 'list_labels': {
       const all = await labels(resolveAccount(str(args.account, 'account')));
       return all.map((l) => `${l.name}  (${l.id})`).join('\n');
@@ -476,12 +497,25 @@ async function call(name, rawArgs) {
   }
 }
 
+// The audit log stores the real address, so filtering by account works whichever
+// label or address the caller used.
+function withEmail(args = {}) {
+  if (typeof args.account !== 'string') return args;
+  try {
+    return { ...args, account: resolveAccount(args.account) };
+  } catch {
+    return args;
+  }
+}
+
 export function createServer() {
   const server = new Server({ name: 'gmail-tidy-mcp', version }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     try {
-      return { content: [{ type: 'text', text: await call(req.params.name, req.params.arguments) }] };
+      const text = await call(req.params.name, req.params.arguments);
+      recordChange(req.params.name, withEmail(req.params.arguments), text);
+      return { content: [{ type: 'text', text }] };
     } catch (err) {
       return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
     }
