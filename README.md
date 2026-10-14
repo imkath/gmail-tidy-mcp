@@ -21,7 +21,7 @@ This one is built around a smaller promise: the assistant can help you get your 
 |---|---|
 | Accounts | `list_accounts`, `check_accounts`, `connect_account`, `finish_connect_account` |
 | Reading | `search_emails` (Gmail search syntax), `get_email` |
-| Labels | `list_labels`, `create_label` (nest with `Parent/Child`) |
+| Labels | `list_labels`, `create_label` (nest with `Parent/Child`), `set_label_color` (Gmail palette) |
 | Organizing | `organize_emails`: add or remove labels by ID or by search, up to 5,000 messages at a time. Archive = remove `INBOX`, mark as read = remove `UNREAD` |
 | Filters | `list_filters`, `create_filter`, `delete_filter`. A filter that skips the inbox needs an explicit `skip_inbox: true` |
 | Drafts | `create_draft`, optionally as a reply inside a thread. You send it yourself from Gmail |

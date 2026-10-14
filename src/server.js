@@ -8,7 +8,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { listAccounts, resolveAccount, saveAccount } from './store.js';
 import { startLogin, openBrowser } from './auth.js';
 import {
-  search, getMessage, labels, profile, createLabel, relabel,
+  search, getMessage, labels, profile, createLabel, setLabelColor, relabel,
   listFilters, createFilter, deleteFilter, createDraft,
 } from './gmail.js';
 
@@ -127,6 +127,23 @@ const TOOLS = [
     annotations: CHANGES,
     description: 'Creates a label. Use "Parent/Child" to nest it.',
     inputSchema: { type: 'object', properties: { account, name: { type: 'string' } }, required: ['account', 'name'] },
+  },
+  {
+    name: 'set_label_color',
+    annotations: CHANGES,
+    description:
+      'Sets the color of a label. Gmail only accepts its own palette, e.g. #fb4c2f red, #ffad47 orange, ' +
+      '#16a766 green, #2da2bb teal, #4a86e8 blue, #a479e2 purple, #f691b3 pink, #666666 or #cccccc gray.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        label: { type: 'string', description: 'Label name or ID' },
+        background: { type: 'string', description: 'Hex color from the Gmail palette' },
+        text: { type: 'string', description: 'Hex text color (default #ffffff)' },
+      },
+      required: ['account', 'label', 'background'],
+    },
   },
   {
     name: 'organize_emails',
@@ -272,6 +289,13 @@ async function call(name, rawArgs) {
     case 'create_label': {
       const l = await createLabel(resolveAccount(str(args.account, 'account')), str(args.name, 'name'));
       return `Created label ${l.name} (${l.id}).`;
+    }
+    case 'set_label_color': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const [id] = await labelIds(email, [str(args.label, 'label')]);
+      if (SYSTEM_LABELS.includes(id)) throw new Error('System labels like INBOX cannot be recolored.');
+      const l = await setLabelColor(email, id, str(args.background, 'background'), str(args.text, 'text', { optional: true }));
+      return `Label ${l.name} is now ${l.color.backgroundColor} on ${l.color.textColor}.`;
     }
     case 'organize_emails': {
       const email = resolveAccount(str(args.account, 'account'));

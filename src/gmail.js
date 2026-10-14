@@ -136,6 +136,20 @@ export function createLabel(email, name) {
   );
 }
 
+// Gmail only accepts colors from its own palette; the API names the bad value if one
+// isn't in it. This only checks the shape so a typo fails before the request.
+export function labelColor(background, text = '#ffffff') {
+  for (const c of [background, text]) {
+    if (!/^#[0-9a-f]{6}$/i.test(String(c))) throw new Error(`"${c}" is not a hex color like #fb4c2f.`);
+  }
+  return { backgroundColor: background.toLowerCase(), textColor: text.toLowerCase() };
+}
+
+export function setLabelColor(email, id, background, text) {
+  const color = labelColor(background, text);
+  return run(email, async (g) => (await g.users.labels.patch({ userId: 'me', id, requestBody: { color } })).data);
+}
+
 // The last line of defense for "never delete": nothing may add TRASH or SPAM.
 export function assertSafeLabels(add = []) {
   for (const id of add) {

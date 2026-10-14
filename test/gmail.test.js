@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.GMAIL_TIDY_DIR = '/nonexistent-gmail-tidy-test';
-const { extractBody, header, htmlToText } = await import('../src/gmail.js');
+const { extractBody, header, htmlToText, labelColor } = await import('../src/gmail.js');
 const b64 = (s) => Buffer.from(s).toString('base64url');
 
 test('prefers plain text over HTML, even when nested', () => {
@@ -50,4 +50,10 @@ test('decodes UTF-8 bodies', () => {
 test('reads headers case-insensitively', () => {
   assert.equal(header([{ name: 'Subject', value: 'Hello' }], 'subject'), 'Hello');
   assert.equal(header([], 'From'), '');
+});
+
+test('label colors must be hex and default to white text', () => {
+  assert.deepEqual(labelColor('#FB4C2F'), { backgroundColor: '#fb4c2f', textColor: '#ffffff' });
+  assert.throws(() => labelColor('red'), /hex color/);
+  assert.throws(() => labelColor('#fb4c2f', '#fff'), /hex color/);
 });
