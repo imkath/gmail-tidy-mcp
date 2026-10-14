@@ -20,11 +20,12 @@ This one is built around a smaller promise: the assistant can help you get your 
 | Area | Tools |
 |---|---|
 | Accounts | `list_accounts`, `check_accounts`, `connect_account`, `finish_connect_account` |
-| Reading | `search_emails` (Gmail search syntax), `get_email` |
-| Labels | `list_labels`, `create_label` (nest with `Parent/Child`), `set_label_color` (Gmail palette) |
+| Reading | `search_emails` (Gmail search syntax), `get_email` (lists attachments), `get_attachment` (text, `.gz` and `.zip` are read inline, e.g. DMARC reports; anything else, like a PDF, is saved to `~/Downloads/gmail-tidy-mcp`), `sender_stats` (who writes most, by address and domain) |
+| Labels | `list_labels`, `create_label` (nest with `Parent/Child`), `update_label` (rename, recolor with the Gmail palette, show or hide in the sidebar) |
 | Organizing | `organize_emails`: add or remove labels by ID or by search, up to 5,000 messages at a time. Archive = remove `INBOX`, mark as read = remove `UNREAD` |
 | Filters | `list_filters`, `create_filter`, `delete_filter`. A filter that skips the inbox needs an explicit `skip_inbox: true` |
 | Drafts | `create_draft`, optionally as a reply inside a thread. You send it yourself from Gmail |
+| Settings | `set_signature`: changes only the signature, never how mail goes out |
 
 Each account gets a short label, so you can say things like "archive every newsletter older than a month in *work*".
 

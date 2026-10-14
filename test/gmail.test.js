@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 process.env.GMAIL_TIDY_DIR = '/nonexistent-gmail-tidy-test';
-const { extractBody, header, htmlToText, labelColor } = await import('../src/gmail.js');
+const { extractBody, header, htmlToText, labelColor, labelPatch, listAttachments, senderAddress } = await import('../src/gmail.js');
 const b64 = (s) => Buffer.from(s).toString('base64url');
 
 test('prefers plain text over HTML, even when nested', () => {
@@ -56,4 +56,38 @@ test('label colors must be hex and default to white text', () => {
   assert.deepEqual(labelColor('#FB4C2F'), { backgroundColor: '#fb4c2f', textColor: '#ffffff' });
   assert.throws(() => labelColor('red'), /hex color/);
   assert.throws(() => labelColor('#fb4c2f', '#fff'), /hex color/);
+});
+
+test('update_label only patches the fields it was given', () => {
+  assert.deepEqual(labelPatch({ name: ' Clientes/Flets ' }), { name: 'Clientes/Flets' });
+  assert.deepEqual(labelPatch({ sidebar: 'unread', inMessageList: false }), { labelListVisibility: 'labelShowIfUnread', messageListVisibility: 'hide' });
+  assert.deepEqual(labelPatch({ background: '#16A766' }), { color: { backgroundColor: '#16a766', textColor: '#ffffff' } });
+  assert.throws(() => labelPatch({}), /Nothing to change/);
+  assert.throws(() => labelPatch({ text: '#ffffff' }), /background together/);
+  assert.throws(() => labelPatch({ sidebar: 'maybe' }), /show, hide or unread/);
+  assert.throws(() => labelPatch({ name: '  ' }), /cannot be empty/);
+});
+
+test('lists attachments by part, including nested ones', () => {
+  const payload = {
+    parts: [
+      { partId: '0', mimeType: 'text/plain', filename: '', body: { size: 3 } },
+      { partId: '1', mimeType: 'application/pdf', filename: 'factura.pdf', body: { size: 1200, attachmentId: 'A1' } },
+      { partId: '2', mimeType: 'multipart/mixed', filename: '', parts: [
+        { partId: '2.0', mimeType: 'application/zip', filename: 'report.zip', body: { size: 900, attachmentId: 'A2' } },
+      ] },
+    ],
+  };
+  assert.deepEqual(listAttachments(payload).map((a) => [a.part, a.filename]), [['1', 'factura.pdf'], ['2.0', 'report.zip']]);
+});
+
+test('a message that is itself the attachment gets part 0', () => {
+  const payload = { partId: '', mimeType: 'application/zip', filename: 'google.com!example.cl!1!2.zip', body: { size: 760, attachmentId: 'A1' } };
+  assert.deepEqual(listAttachments(payload).map((a) => [a.part, a.filename]), [['0', 'google.com!example.cl!1!2.zip']]);
+});
+
+test('gets the address out of a From header', () => {
+  assert.equal(senderAddress('"Banco Ejemplo" <Avisos@Banco.cl>'), 'avisos@banco.cl');
+  assert.equal(senderAddress('noreply@github.com'), 'noreply@github.com');
+  assert.equal(senderAddress('Sin correo'), '');
 });

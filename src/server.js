@@ -1,5 +1,6 @@
 // MCP server to read and organize several Gmail accounts.
-// It can connect accounts, search, read, label, archive, manage filters and write drafts.
+// It can connect accounts, search, read, download attachments, label, archive, manage filters,
+// set signatures and write drafts.
 // It cannot send or delete mail: no tool does that, by design.
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
@@ -8,9 +9,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { listAccounts, resolveAccount, saveAccount } from './store.js';
 import { startLogin, openBrowser } from './auth.js';
 import {
-  search, getMessage, labels, profile, createLabel, setLabelColor, relabel,
+  search, getMessage, getAttachment, senderStats, labels, profile, createLabel, updateLabel, setSignature, relabel,
   listFilters, createFilter, deleteFilter, createDraft,
 } from './gmail.js';
+import { DOWNLOADS, MAX_INLINE, readableText, saveFile } from './files.js';
 
 const SYSTEM_LABELS = ['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT', 'SPAM', 'TRASH', 'SENT', 'DRAFT',
   'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
@@ -120,6 +122,41 @@ const TOOLS = [
       required: ['account', 'message_id'],
     },
   },
+  {
+    name: 'get_attachment',
+    annotations: READ,
+    description:
+      'Gets an attachment of an email (get_email lists them with their part number). Text files, and .gz or .zip ' +
+      'archives with text inside (like DMARC reports), are returned as text. Anything else, like a PDF, is saved to ' +
+      'the downloads folder and the path is returned. Set save to true to always save the file.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        message_id: { type: 'string' },
+        attachment: { type: 'string', description: 'Part number from get_email, or the file name' },
+        save: { type: 'boolean', description: 'Save to disk even if it is text' },
+      },
+      required: ['account', 'message_id', 'attachment'],
+    },
+  },
+  {
+    name: 'sender_stats',
+    annotations: READ,
+    description:
+      'Counts who sends the most mail for a Gmail search, by address and by domain. ' +
+      'Useful to decide what to filter or label. Default search: the last 30 days.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        query: { type: 'string', description: 'Gmail search (default newer_than:30d)' },
+        max: { type: 'number', description: 'Emails to scan (default 500, max 2000)' },
+        top: { type: 'number', description: 'Rows to show (default 25)' },
+      },
+      required: ['account'],
+    },
+  },
   { name: 'list_labels',
     annotations: READ, description: 'Lists the labels of an account.', inputSchema: { type: 'object', properties: { account }, required: ['account'] } },
   {
@@ -129,20 +166,24 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { account, name: { type: 'string' } }, required: ['account', 'name'] },
   },
   {
-    name: 'set_label_color',
+    name: 'update_label',
     annotations: CHANGES,
     description:
-      'Sets the color of a label. Gmail only accepts its own palette, e.g. #fb4c2f red, #ffad47 orange, ' +
-      '#16a766 green, #2da2bb teal, #4a86e8 blue, #a479e2 purple, #f691b3 pink, #666666 or #cccccc gray.',
+      'Changes a label: rename it (use "Parent/Child" to move it under another), recolor it, or choose whether it shows ' +
+      'in the sidebar and in the message list. Only the fields you pass change. Colors must come from the Gmail palette, ' +
+      'e.g. #fb4c2f red, #ffad47 orange, #16a766 green, #2da2bb teal, #4a86e8 blue, #a479e2 purple, #f691b3 pink, #666666 or #cccccc gray.',
     inputSchema: {
       type: 'object',
       properties: {
         account,
         label: { type: 'string', description: 'Label name or ID' },
+        new_name: { type: 'string' },
         background: { type: 'string', description: 'Hex color from the Gmail palette' },
-        text: { type: 'string', description: 'Hex text color (default #ffffff)' },
+        text: { type: 'string', description: 'Hex text color (default #ffffff); needs background' },
+        sidebar: { type: 'string', enum: ['show', 'hide', 'unread'], description: 'Sidebar visibility; unread = only when it has unread mail' },
+        in_message_list: { type: 'boolean', description: 'Show the label on messages in the list' },
       },
-      required: ['account', 'label', 'background'],
+      required: ['account', 'label'],
     },
   },
   {
@@ -196,6 +237,22 @@ const TOOLS = [
     annotations: RISKY,
     description: 'Deletes a filter by ID. It does not touch any email.',
     inputSchema: { type: 'object', properties: { account, filter_id: { type: 'string' } }, required: ['account', 'filter_id'] },
+  },
+  {
+    name: 'set_signature',
+    annotations: CHANGES,
+    description:
+      'Sets the email signature of an account (HTML allowed). Only the signature changes; it sends nothing. ' +
+      'An empty signature removes it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        signature: { type: 'string', description: 'Signature text or HTML' },
+        send_as: { type: 'string', description: 'Alias address, if the signature is for an alias instead of the main address' },
+      },
+      required: ['account', 'signature'],
+    },
   },
   {
     name: 'create_draft',
@@ -277,7 +334,9 @@ async function call(name, rawArgs) {
     case 'get_email': {
       const m = await getMessage(resolveAccount(str(args.account, 'account')), str(args.message_id, 'message_id'));
       return untrusted(
-        [`From: ${m.from}`, `To: ${m.to}`, m.cc ? `Cc: ${m.cc}` : null, `Subject: ${m.subject}`, `Date: ${m.date}`, `Labels: ${m.labels.join(', ')}`, '', m.body]
+        [`From: ${m.from}`, `To: ${m.to}`, m.cc ? `Cc: ${m.cc}` : null, `Subject: ${m.subject}`, `Date: ${m.date}`, `Labels: ${m.labels.join(', ')}`,
+          m.attachments.length ? `Attachments: ${m.attachments.map((a) => `[part ${a.part}] ${a.filename} (${a.mimeType}, ${a.size} bytes)`).join('; ')}` : null,
+          '', m.body]
           .filter((l) => l !== null)
           .join('\n')
       );
@@ -290,12 +349,49 @@ async function call(name, rawArgs) {
       const l = await createLabel(resolveAccount(str(args.account, 'account')), str(args.name, 'name'));
       return `Created label ${l.name} (${l.id}).`;
     }
-    case 'set_label_color': {
+    case 'update_label': {
       const email = resolveAccount(str(args.account, 'account'));
       const [id] = await labelIds(email, [str(args.label, 'label')]);
-      if (SYSTEM_LABELS.includes(id)) throw new Error('System labels like INBOX cannot be recolored.');
-      const l = await setLabelColor(email, id, str(args.background, 'background'), str(args.text, 'text', { optional: true }));
-      return `Label ${l.name} is now ${l.color.backgroundColor} on ${l.color.textColor}.`;
+      if (SYSTEM_LABELS.includes(id)) throw new Error('System labels like INBOX cannot be changed.');
+      if (args.in_message_list !== undefined && typeof args.in_message_list !== 'boolean') throw new Error('in_message_list must be true or false.');
+      const l = await updateLabel(email, id, {
+        name: str(args.new_name, 'new_name', { optional: true }),
+        background: str(args.background, 'background', { optional: true }),
+        text: str(args.text, 'text', { optional: true }),
+        sidebar: str(args.sidebar, 'sidebar', { optional: true }),
+        inMessageList: args.in_message_list,
+      });
+      const color = l.color ? `, ${l.color.backgroundColor} on ${l.color.textColor}` : '';
+      return `Label ${l.name} updated (sidebar: ${l.labelListVisibility}, message list: ${l.messageListVisibility}${color}).`;
+    }
+    case 'get_attachment': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const a = await getAttachment(email, str(args.message_id, 'message_id'), str(args.attachment, 'attachment'));
+      const text = args.save === true ? null : readableText(a.filename, a.mimeType, a.bytes);
+      if (text !== null) {
+        const shown = text.length > MAX_INLINE ? text.slice(0, MAX_INLINE) + '\n[... truncated; use save: true for the whole file ...]' : text;
+        return untrusted(`File: ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes)\n\n${shown}`);
+      }
+      const path = saveFile(DOWNLOADS, a.filename, a.bytes);
+      return `Saved ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes) to ${path}`;
+    }
+    case 'sender_stats': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const query = str(args.query, 'query', { optional: true }) ?? 'newer_than:30d';
+      const top = Math.min(Math.max(Number(args.top) || 25, 1), 200);
+      const { scanned, senders } = await senderStats(email, query, args.max);
+      if (!senders.length) return `No mail matched "${query}" in ${email}.`;
+      const domains = new Map();
+      for (const s of senders) {
+        const d = s.address.split('@')[1];
+        domains.set(d, (domains.get(d) ?? 0) + s.count);
+      }
+      const byDomain = [...domains].sort((x, y) => y[1] - x[1]).slice(0, top);
+      return untrusted(
+        [`Scanned ${scanned} emails in ${email} for "${query}".`, '', 'Top senders:',
+          ...senders.slice(0, top).map((s) => `${String(s.count).padStart(5)}  ${s.address}${s.name && s.name !== s.address ? `  (${s.name})` : ''}`),
+          '', 'Top domains:', ...byDomain.map(([d, n]) => `${String(n).padStart(5)}  ${d}`)].join('\n')
+      );
     }
     case 'organize_emails': {
       const email = resolveAccount(str(args.account, 'account'));
@@ -334,6 +430,13 @@ async function call(name, rawArgs) {
     case 'delete_filter': {
       await deleteFilter(resolveAccount(str(args.account, 'account')), str(args.filter_id, 'filter_id'));
       return `Deleted filter ${args.filter_id}.`;
+    }
+    case 'set_signature': {
+      const email = resolveAccount(str(args.account, 'account'));
+      if (typeof args.signature !== 'string') throw new Error('signature must be a string.');
+      const sendAs = str(args.send_as, 'send_as', { optional: true });
+      await setSignature(email, sendAs, args.signature);
+      return args.signature ? `Signature updated for ${sendAs ?? email}.` : `Signature removed for ${sendAs ?? email}.`;
     }
     case 'create_draft': {
       const id = await createDraft(resolveAccount(str(args.account, 'account')), {

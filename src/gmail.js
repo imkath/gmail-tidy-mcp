@@ -101,6 +101,22 @@ export function search(email, query, maxResults = 10) {
   });
 }
 
+// Every part with a file name, in document order. partId is stable for a message,
+// unlike attachmentId, so it's what tools hand back to the caller. When the whole
+// message is the file (DMARC reports often are), Gmail leaves partId empty: that
+// one is called "0", which can't clash because such a message has no other parts.
+export function listAttachments(payload) {
+  const out = [];
+  const walk = (part) => {
+    if (part?.filename && part.body) {
+      out.push({ part: part.partId || '0', filename: part.filename, mimeType: part.mimeType, size: part.body.size ?? 0, attachmentId: part.body.attachmentId, data: part.body.data });
+    }
+    for (const p of part?.parts ?? []) walk(p);
+  };
+  walk(payload);
+  return out;
+}
+
 export function getMessage(email, id) {
   return run(email, async (g) => {
     const { data: m } = await g.users.messages.get({ userId: 'me', id, format: 'full' });
@@ -114,8 +130,64 @@ export function getMessage(email, id) {
       subject: header(h, 'Subject'),
       date: header(h, 'Date'),
       labels: m.labelIds ?? [],
+      attachments: listAttachments(m.payload).map(({ part, filename, mimeType, size }) => ({ part, filename, mimeType, size })),
       body,
     };
+  });
+}
+
+// Finds an attachment by part ID or file name and returns its bytes.
+export function getAttachment(email, messageId, which) {
+  return run(email, async (g) => {
+    const { data: m } = await g.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+    const all = listAttachments(m.payload);
+    const hit = all.find((a) => a.part === which) ?? all.find((a) => a.filename.toLowerCase() === String(which).toLowerCase());
+    if (!hit) {
+      const names = all.map((a) => `${a.part} ${a.filename}`).join(', ') || 'none';
+      throw new Error(`No attachment "${which}" in that email. Attachments: ${names}.`);
+    }
+    let data = hit.data;
+    if (!data) {
+      data = (await g.users.messages.attachments.get({ userId: 'me', messageId, id: hit.attachmentId })).data.data;
+    }
+    return { filename: hit.filename, mimeType: hit.mimeType, bytes: Buffer.from(data, 'base64url') };
+  });
+}
+
+// "Name <a@b.com>" or "a@b.com" -> lowercase address. Empty when there is none.
+export function senderAddress(from) {
+  const m = String(from).match(/<([^<>\s]+@[^<>\s]+)>/) ?? String(from).match(/([^\s<>"]+@[^\s<>"]+)/);
+  return m ? m[1].toLowerCase() : '';
+}
+
+// Counts senders over a search. Only the From header is fetched, a few at a time.
+export function senderStats(email, query, max = 500) {
+  const limit = Math.min(Math.max(Number(max) || 500, 1), 2000);
+  return run(email, async (g) => {
+    const ids = [];
+    let pageToken;
+    while (ids.length < limit) {
+      const { data } = await g.users.messages.list({ userId: 'me', q: query, maxResults: Math.min(500, limit - ids.length), pageToken });
+      ids.push(...(data.messages ?? []).map((m) => m.id));
+      pageToken = data.nextPageToken;
+      if (!pageToken) break;
+    }
+    const senders = new Map();
+    for (let i = 0; i < ids.length; i += 20) {
+      const batch = await Promise.all(
+        ids.slice(i, i + 20).map((id) =>
+          g.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From'] }).then(({ data }) => header(data.payload?.headers, 'From'))
+        )
+      );
+      for (const from of batch) {
+        const address = senderAddress(from);
+        if (!address) continue;
+        const s = senders.get(address) ?? { address, name: from.replace(/<[^>]*>/, '').replace(/"/g, '').trim(), count: 0 };
+        s.count++;
+        senders.set(address, s);
+      }
+    }
+    return { scanned: ids.length, senders: [...senders.values()].sort((a, b) => b.count - a.count) };
   });
 }
 
@@ -145,9 +217,38 @@ export function labelColor(background, text = '#ffffff') {
   return { backgroundColor: background.toLowerCase(), textColor: text.toLowerCase() };
 }
 
-export function setLabelColor(email, id, background, text) {
-  const color = labelColor(background, text);
-  return run(email, async (g) => (await g.users.labels.patch({ userId: 'me', id, requestBody: { color } })).data);
+const SIDEBAR = { show: 'labelShow', hide: 'labelHide', unread: 'labelShowIfUnread' };
+
+// Builds the patch for update_label from only the fields the caller gave, so
+// nothing else about the label changes.
+export function labelPatch({ name, background, text, sidebar, inMessageList }) {
+  const patch = {};
+  if (name !== undefined) {
+    if (!String(name).trim()) throw new Error('The new name cannot be empty.');
+    patch.name = String(name).trim();
+  }
+  if (background !== undefined) patch.color = labelColor(background, text);
+  else if (text !== undefined) throw new Error('Pass background together with text.');
+  if (sidebar !== undefined) {
+    if (!SIDEBAR[sidebar]) throw new Error('sidebar must be show, hide or unread.');
+    patch.labelListVisibility = SIDEBAR[sidebar];
+  }
+  if (inMessageList !== undefined) patch.messageListVisibility = inMessageList ? 'show' : 'hide';
+  if (!Object.keys(patch).length) throw new Error('Nothing to change: pass a new name, a color or a visibility.');
+  return patch;
+}
+
+export function updateLabel(email, id, changes) {
+  const requestBody = labelPatch(changes);
+  return run(email, async (g) => (await g.users.labels.patch({ userId: 'me', id, requestBody })).data);
+}
+
+// Only the signature field is sent, so this can't change the reply-to address,
+// the display name or anything else about how mail goes out.
+export function setSignature(email, sendAsEmail, signature) {
+  return run(email, async (g) =>
+    (await g.users.settings.sendAs.patch({ userId: 'me', sendAsEmail: sendAsEmail ?? email, requestBody: { signature } })).data
+  );
 }
 
 // The last line of defense for "never delete": nothing may add TRASH or SPAM.

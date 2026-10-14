@@ -9,6 +9,12 @@ const { _TOOLS } = await import('../src/server.js');
 const { SCOPES } = await import('../src/auth.js');
 const { assertSafeLabels, filterAction, relabel } = await import('../src/gmail.js');
 
+test('the forbidden-name rule still catches real send tools', () => {
+  const rule = /(^|_)(send|reply|forward|trash)(_|$)/;
+  for (const bad of ['send_email', 'reply', 'forward_email', 'trash_thread', 'quick_reply']) assert.ok(rule.test(bad), bad);
+  assert.ok(!rule.test('sender_stats'));
+});
+
 test('asks only for the scopes it needs', () => {
   assert.deepEqual([...SCOPES].sort(), [
     'https://www.googleapis.com/auth/gmail.modify',
@@ -18,7 +24,8 @@ test('asks only for the scopes it needs', () => {
 
 test('no tool sends, replies, forwards or deletes mail', () => {
   for (const t of _TOOLS) {
-    assert.ok(!/send|reply|forward|trash/.test(t.name), `forbidden tool: ${t.name}`);
+    // Whole words only: sender_stats counts senders, it doesn't send.
+    assert.ok(!/(^|_)(send|reply|forward|trash)(_|$)/.test(t.name), `forbidden tool: ${t.name}`);
     if (t.name.includes('delete')) assert.equal(t.name, 'delete_filter');
   }
 });
