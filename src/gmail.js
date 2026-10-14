@@ -4,6 +4,7 @@
 // Trash and Spam even if a caller asks for it.
 import { google } from 'googleapis';
 import { authedClient, isTokenError } from './auth.js';
+import { injectionSignals, mailRisks, stripInvisible } from './security.js';
 
 const MAX_BODY = 40_000;
 const FORBIDDEN_LABELS = new Set(['TRASH', 'SPAM']);
@@ -25,7 +26,7 @@ async function run(email, fn) {
 // crafted subject can't fake extra lines (like "Labels:") in what the model reads.
 export function header(headers, name) {
   const value = headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
-  return value.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
+  return stripInvisible(value).text.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
 }
 
 function charsetOf(part) {
@@ -47,7 +48,7 @@ function decode(part) {
 export function htmlToText(html) {
   return html
     .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<(\w+)[^>]*style\s*=\s*["'][^"']*(display\s*:\s*none|visibility\s*:\s*hidden)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(\w+)[^>]*style\s*=\s*["'][^"']*(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?![.\d])|opacity\s*:\s*0(?![.\d])|max-height\s*:\s*0(?![.\d]))[^>]*>[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>|<\/(p|div|li|tr|h\d)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
@@ -59,6 +60,16 @@ export function htmlToText(html) {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n+/g, '\n\n')
     .trim();
+}
+
+function firstHtml(payload) {
+  if (!payload) return '';
+  if (payload.mimeType === 'text/html' && payload.body?.data) return decode(payload);
+  for (const part of payload.parts ?? []) {
+    const html = firstHtml(part);
+    if (html) return html;
+  }
+  return '';
 }
 
 export function extractBody(payload) {
@@ -93,7 +104,7 @@ export function search(email, query, maxResults = 10) {
           from: header(h, 'From'),
           subject: header(h, 'Subject'),
           date: header(h, 'Date'),
-          snippet: (m.snippet ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' '),
+          snippet: stripInvisible(m.snippet ?? '').text.replace(/[\u0000-\u001f\u007f]+/g, ' '),
           labels: m.labelIds ?? [],
         };
       })
@@ -121,9 +132,20 @@ export function getMessage(email, id) {
   return run(email, async (g) => {
     const { data: m } = await g.users.messages.get({ userId: 'me', id, format: 'full' });
     const h = m.payload?.headers;
-    let body = extractBody(m.payload);
+    const cleaned = stripInvisible(extractBody(m.payload));
+    let body = cleaned.text;
     if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY) + '\n[... body truncated ...]';
+    const security = mailRisks({
+      from: header(h, 'From'),
+      replyTo: header(h, 'Reply-To'),
+      authResults: header(h, 'Authentication-Results'),
+      html: firstHtml(m.payload),
+      bulk: Boolean(header(h, 'List-Unsubscribe') || header(h, 'List-Id')),
+    });
+    if (cleaned.tags) security.push(`${cleaned.tags} invisible "tag" characters were removed from the text: they are used to hide instructions for AI`);
+    for (const why of injectionSignals(body)) security.push(`possible prompt injection: ${why}`);
     return {
+      security,
       from: header(h, 'From'),
       to: header(h, 'To'),
       cc: header(h, 'Cc'),

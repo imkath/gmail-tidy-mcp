@@ -42,19 +42,24 @@ Google has no scope that allows drafts but not sending, so the server asks for `
 - **Sign-in uses PKCE and a random `state`**, with the redirect on `127.0.0.1` only.
 - **The signed-in account is verified.** After sign-in, the server asks Gmail which address it got. If it is not the one you asked for, or Google granted different scopes, the token is revoked and nothing is saved.
 - **Your own OAuth client.** No shared client and no third-party server. Your mail goes from Google to your machine and nowhere else.
-- **Email content is fenced off as untrusted.** Everything read from Gmail goes inside a block whose markers carry a random value per call, so an email can't close the block early. Control characters in headers are removed, and HTML is reduced to visible text (scripts, styles and `display:none` content are dropped).
+- **Email content is fenced off as untrusted.** Everything read from Gmail goes inside a block whose markers carry a random value per call, so an email can't close the block early. Control characters in headers are removed, and HTML is reduced to visible text (scripts, styles, and text hidden with `display:none`, `visibility:hidden`, `font-size:0` or `opacity:0` are dropped).
+- **Invisible text is removed.** Unicode tag characters (used to smuggle instructions that a model reads but you can't see), zero-width characters and text-direction controls are stripped from headers, bodies and attachments. Tag characters are reported, since they have no legitimate use in mail.
+- **Security notes come from the server, not the sender.** `get_email` and `get_attachment` add a short list of findings above the untrusted block: phrasing typical of prompt injection, failed SPF, DKIM or DMARC, a Reply-To that sends answers to a free webmail address, a display name that pretends to be another address, and links that show one site but lead to another (Gmail and Outlook redirect wrappers are unwrapped first; tracking links in mailing lists are not flagged). They are tuned to stay quiet on normal mail, so a note means something.
+- **Dangerous attachments are not saved.** Executables and scripts, disguised names (`factura.pdf.exe`, right-to-left override tricks), files whose bytes don't match their extension, and archives that contain any of those are refused unless the call says `allow_risky: true`. Password-protected archives, macro-enabled Office files and PDFs with JavaScript or auto-run actions are flagged. Saved files never overwrite anything, can't be written outside the downloads folder, and on macOS get the quarantine flag so Gatekeeper checks them before they open.
 - **Drafts can't smuggle headers.** Line breaks in To, Cc, Subject or the reply headers are rejected, so nobody can sneak in a hidden Bcc.
 - **Arguments are validated** before anything reaches Gmail, and the tools that change things carry MCP annotations (`destructiveHint`) so clients can ask you before running them.
 - Two runtime dependencies (`@modelcontextprotocol/sdk` and `googleapis`), pinned to exact versions, none with install scripts.
 
 ### What could still go wrong
 
-No server can make prompt injection impossible. If a malicious email convinces the model, it could still:
+No server can make prompt injection impossible, and the security notes are heuristics: they catch common tricks, not every one, and a clean result proves nothing. If a malicious email convinces the model, it could still:
 
 - relabel or archive mail (you can undo this),
 - create a filter that hides new mail from the inbox (only with `skip_inbox: true`, and your client can ask you first),
 - delete one of your filters (filters can't be recovered),
-- write a misleading draft. It is never sent unless you send it.
+- write a misleading draft. It is never sent unless you send it,
+- rename or recolor a label, or change your signature (all reversible),
+- save an attachment flagged as dangerous, if it also sets `allow_risky: true`; opening it is still up to you.
 
 Two more things worth knowing:
 

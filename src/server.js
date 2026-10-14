@@ -13,6 +13,7 @@ import {
   listFilters, createFilter, deleteFilter, createDraft,
 } from './gmail.js';
 import { DOWNLOADS, MAX_INLINE, readableText, saveFile } from './files.js';
+import { attachmentRisks, injectionSignals, stripInvisible } from './security.js';
 
 const SYSTEM_LABELS = ['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT', 'SPAM', 'TRASH', 'SENT', 'DRAFT',
   'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'];
@@ -48,6 +49,12 @@ const UNTRUSTED =
 function untrusted(text) {
   const tag = `UNTRUSTED-${randomBytes(6).toString('hex')}`;
   return `<<<${tag}>>>\n${text}\n<<<END-${tag}>>>`;
+}
+
+// Warnings computed by this server go outside the UNTRUSTED block: they are the
+// server's own findings, not text written by the sender.
+function securityNotes(list) {
+  return list.length ? `SECURITY NOTES (from gmail-tidy-mcp, not from the sender):\n${list.map((w) => `- ${w}`).join('\n')}\n\n` : '';
 }
 
 // Tool arguments arrive as whatever the client sends; the SDK doesn't check them
@@ -128,7 +135,8 @@ const TOOLS = [
     description:
       'Gets an attachment of an email (get_email lists them with their part number). Text files, and .gz or .zip ' +
       'archives with text inside (like DMARC reports), are returned as text. Anything else, like a PDF, is saved to ' +
-      'the downloads folder and the path is returned. Set save to true to always save the file.' + UNTRUSTED,
+      'the downloads folder and the path is returned. Set save to true to always save the file. ' +
+      'Files that can run code are flagged and not saved unless allow_risky is true.' + UNTRUSTED,
     inputSchema: {
       type: 'object',
       properties: {
@@ -136,6 +144,10 @@ const TOOLS = [
         message_id: { type: 'string' },
         attachment: { type: 'string', description: 'Part number from get_email, or the file name' },
         save: { type: 'boolean', description: 'Save to disk even if it is text' },
+        allow_risky: {
+          type: 'boolean',
+          description: 'Save a file flagged as dangerous (executables, disguised extensions). Only when the user asked for that exact file.',
+        },
       },
       required: ['account', 'message_id', 'attachment'],
     },
@@ -333,7 +345,7 @@ async function call(name, rawArgs) {
     }
     case 'get_email': {
       const m = await getMessage(resolveAccount(str(args.account, 'account')), str(args.message_id, 'message_id'));
-      return untrusted(
+      return securityNotes(m.security) + untrusted(
         [`From: ${m.from}`, `To: ${m.to}`, m.cc ? `Cc: ${m.cc}` : null, `Subject: ${m.subject}`, `Date: ${m.date}`, `Labels: ${m.labels.join(', ')}`,
           m.attachments.length ? `Attachments: ${m.attachments.map((a) => `[part ${a.part}] ${a.filename} (${a.mimeType}, ${a.size} bytes)`).join('; ')}` : null,
           '', m.body]
@@ -367,13 +379,24 @@ async function call(name, rawArgs) {
     case 'get_attachment': {
       const email = resolveAccount(str(args.account, 'account'));
       const a = await getAttachment(email, str(args.message_id, 'message_id'), str(args.attachment, 'attachment'));
-      const text = args.save === true ? null : readableText(a.filename, a.mimeType, a.bytes);
-      if (text !== null) {
+      const risk = attachmentRisks(a.filename, a.bytes);
+      const notes = [...risk.warnings];
+      const raw = args.save === true || risk.block ? null : readableText(a.filename, a.mimeType, a.bytes);
+      if (raw !== null) {
+        const cleaned = stripInvisible(raw);
+        if (cleaned.tags) notes.push(`${cleaned.tags} invisible "tag" characters were removed from the text: they are used to hide instructions for AI`);
+        for (const why of injectionSignals(cleaned.text)) notes.push(`possible prompt injection: ${why}`);
+        const text = cleaned.text;
         const shown = text.length > MAX_INLINE ? text.slice(0, MAX_INLINE) + '\n[... truncated; use save: true for the whole file ...]' : text;
-        return untrusted(`File: ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes)\n\n${shown}`);
+        return securityNotes(notes) + untrusted(`File: ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes)\n\n${shown}`);
+      }
+      if (risk.block && args.allow_risky !== true) {
+        return securityNotes(notes) +
+          `Not saved: ${a.filename} looks dangerous. Only retry with allow_risky: true if the user explicitly asked for this exact file and trusts the sender.`;
       }
       const path = saveFile(DOWNLOADS, a.filename, a.bytes);
-      return `Saved ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes) to ${path}`;
+      return securityNotes(notes) + `Saved ${a.filename} (${a.mimeType}, ${a.bytes.length} bytes) to ${path}` +
+        (process.platform === 'darwin' ? '\nIt is marked as downloaded from the internet, so macOS checks it before opening.' : '');
     }
     case 'sender_stats': {
       const email = resolveAccount(str(args.account, 'account'));

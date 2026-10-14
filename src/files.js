@@ -3,6 +3,7 @@
 // sender, so it's reduced to a bare name before it touches the disk.
 import { gunzipSync, inflateRawSync } from 'node:zlib';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 
@@ -88,5 +89,19 @@ export function saveFile(dir, filename, bytes) {
   let path = join(dir, name);
   for (let i = 2; existsSync(path); i++) path = join(dir, `${stem} (${i})${ext}`);
   writeFileSync(path, bytes, { flag: 'wx' });
+  quarantine(path);
   return path;
+}
+
+// On macOS, mark the file as downloaded from the internet, like a browser does, so
+// Gatekeeper checks it before anything in it can run. Best effort elsewhere.
+export function quarantine(path) {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const stamp = Math.floor(Date.now() / 1000).toString(16);
+    execFileSync('/usr/bin/xattr', ['-w', 'com.apple.quarantine', `0083;${stamp};gmail-tidy-mcp;`, path]);
+    return true;
+  } catch {
+    return false;
+  }
 }

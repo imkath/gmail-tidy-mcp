@@ -58,3 +58,14 @@ test('a filter action is only ever two label lists', () => {
   assert.throws(() => filterAction({ add: ['TRASH'] }), /not allowed/);
   assert.throws(() => filterAction({}), /at least one label/);
 });
+
+test('the source has no literal invisible characters', () => {
+  // They would make the code say something other than what a reviewer sees.
+  const invisible = /[\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{2069}\u{FEFF}\u{AD}\u{E0000}-\u{E007F}]/u;
+  for (const folder of ['../src/', '../bin/', './']) {
+    const dir = new URL(folder, import.meta.url);
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+      assert.ok(!invisible.test(readFileSync(new URL(file, dir), 'utf8')), `${folder}${file} has an invisible character`);
+    }
+  }
+});
