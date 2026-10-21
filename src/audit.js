@@ -15,6 +15,7 @@ const KEEP = {
   create_filter: ['account', 'from', 'to', 'subject', 'query', 'add_labels', 'remove_labels', 'skip_inbox'],
   delete_filter: ['account', 'filter_id'],
   create_draft: ['account', 'to', 'cc', 'subject', 'reply_to_id', 'attachments'],
+  update_draft: ['account', 'draft_id', 'to', 'cc', 'subject', 'attachments', 'keep_attachments'],
   set_signature: ['account', 'send_as'],
   get_attachment: ['account', 'message_id', 'attachment', 'allow_risky'],
   connect_account: ['email', 'label'],
@@ -24,6 +25,7 @@ const KEEP = {
 export function auditEntry(tool, args = {}, result = '', time = new Date()) {
   const kept = Object.fromEntries((KEEP[tool] ?? []).filter((k) => args[k] !== undefined).map((k) => [k, args[k]]));
   if (tool === 'set_signature') kept.signature_length = String(args.signature ?? '').length;
+  if (tool === 'update_draft' && args.body !== undefined) kept.body_changed = true;
   if (tool === 'organize_emails' && Array.isArray(kept.message_ids) && kept.message_ids.length > 20) {
     kept.message_ids = `${kept.message_ids.length} ids`;
   }

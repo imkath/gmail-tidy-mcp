@@ -9,9 +9,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { DIR, listAccounts, resolveAccount, saveAccount } from './store.js';
 import { startLogin, openBrowser } from './auth.js';
 import {
-  search, getMessage, getAttachment, senderStats, labels, profile, createLabel, updateLabel, setSignature, relabel,
-  listFilters, createFilter, deleteFilter, createDraft,
+  search, getMessage, getThread, getAttachment, senderStats, newsletters, labels, profile, createLabel, updateLabel,
+  setSignature, relabel, listFilters, createFilter, deleteFilter, createDraft, listDrafts, updateDraft,
 } from './gmail.js';
+import { baseDomain } from './security.js';
 import { DOWNLOADS, MAX_ATTACH_BYTES, MAX_INLINE, attachDirs, readAttachable, readableText, saveFile } from './files.js';
 import { attachmentRisks, injectionSignals, stripInvisible } from './security.js';
 import { recentChanges, recordChange } from './audit.js';
@@ -50,6 +51,10 @@ const UNTRUSTED =
 function untrusted(text) {
   const tag = `UNTRUSTED-${randomBytes(6).toString('hex')}`;
   return `<<<${tag}>>>\n${text}\n<<<END-${tag}>>>`;
+}
+
+function searchRow(m) {
+  return [`ID: ${m.id}`, `Thread: ${m.threadId}`, `From: ${m.from}`, `Subject: ${m.subject}`, `Date: ${m.date}`, `Snippet: ${m.snippet}`, `Labels: ${m.labels.join(', ')}`].join('\n');
 }
 
 // Warnings computed by this server go outside the UNTRUSTED block: they are the
@@ -131,6 +136,31 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_thread',
+    annotations: READ,
+    description:
+      'Reads a whole conversation, oldest first, by thread ID or by the ID of any email in it. Quoted history ' +
+      'inside replies is trimmed so each message shows what it added.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: { account, thread_id: { type: 'string', description: 'Thread ID or message ID' } },
+      required: ['account', 'thread_id'],
+    },
+  },
+  {
+    name: 'search_all_accounts',
+    annotations: READ,
+    description: 'Runs one Gmail search across every connected account and groups the results by account.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Gmail search query' },
+        max_per_account: { type: 'number', description: 'Between 1 and 20 (default 5)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'get_attachment',
     annotations: READ,
     description:
@@ -182,6 +212,23 @@ const TOOLS = [
         account: { type: 'string', description: 'Only this account (optional)' },
         limit: { type: 'number', description: 'How many (default 20, max 500)' },
       },
+    },
+  },
+  {
+    name: 'newsletters',
+    annotations: READ,
+    description:
+      'Lists the mailing lists and newsletters that wrote in a period, by volume, with the unsubscribe link each one ' +
+      'declares. It only reports: it never unsubscribes on its own.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        query: { type: 'string', description: 'Gmail search (default newer_than:90d)' },
+        max: { type: 'number', description: 'Emails to scan (default 500, max 2000)' },
+        top: { type: 'number', description: 'Rows to show (default 30)' },
+      },
+      required: ['account'],
     },
   },
   { name: 'list_labels',
@@ -282,6 +329,37 @@ const TOOLS = [
     },
   },
   {
+    name: 'list_drafts',
+    annotations: READ,
+    description: 'Lists the drafts of an account, newest first, with their ID so they can be edited.' + UNTRUSTED,
+    inputSchema: {
+      type: 'object',
+      properties: { account, max: { type: 'number', description: 'Between 1 and 100 (default 20)' } },
+      required: ['account'],
+    },
+  },
+  {
+    name: 'update_draft',
+    annotations: CHANGES,
+    description:
+      'Edits an existing draft instead of creating a new one. Only the fields you pass change; the rest, including ' +
+      'the thread it answers and its current attachments, stays. It is still NOT sent.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        draft_id: { type: 'string', description: 'From list_drafts or create_draft' },
+        to: { type: 'string' },
+        cc: { type: 'string' },
+        subject: { type: 'string' },
+        body: { type: 'string' },
+        attachments: { type: 'array', items: { type: 'string' }, description: 'Paths of local files to add' },
+        keep_attachments: { type: 'boolean', description: 'false drops the attachments the draft already has (default true)' },
+      },
+      required: ['account', 'draft_id'],
+    },
+  },
+  {
     name: 'create_draft',
     annotations: CHANGES,
     description:
@@ -355,11 +433,42 @@ async function call(name, rawArgs) {
       const email = resolveAccount(str(args.account, 'account'));
       const found = await search(email, str(args.query, 'query'), args.max_results);
       if (!found.length) return `Nothing found in ${email}.`;
-      return untrusted(
-        found
-          .map((m) => [`ID: ${m.id}`, `From: ${m.from}`, `Subject: ${m.subject}`, `Date: ${m.date}`, `Snippet: ${m.snippet}`, `Labels: ${m.labels.join(', ')}`].join('\n'))
-          .join('\n\n---\n\n')
-      );
+      return untrusted(found.map(searchRow).join('\n\n---\n\n'));
+    }
+    case 'search_all_accounts': {
+      const query = str(args.query, 'query');
+      const n = Math.min(Math.max(Number(args.max_per_account) || 5, 1), 20);
+      const accounts = listAccounts();
+      if (!accounts.length) return 'No accounts connected yet.';
+      const results = await Promise.all(accounts.map(async ({ email, label }) => {
+        try {
+          return { email, label, found: await search(email, query, n) };
+        } catch (e) {
+          return { email, label, error: e.message };
+        }
+      }));
+      const total = results.reduce((t, r) => t + (r.found?.length ?? 0), 0);
+      const blocks = results.map((r) => {
+        const title = `## ${r.label ? `${r.label} (${r.email})` : r.email}`;
+        if (r.error) return `${title}\nError: ${r.error}`;
+        if (!r.found.length) return `${title}\nNothing found.`;
+        return `${title}\n\n${r.found.map(searchRow).join('\n\n---\n\n')}`;
+      });
+      return `${total} result${total === 1 ? '' : 's'} for "${query}" across ${accounts.length} accounts.\n\n` + untrusted(blocks.join('\n\n'));
+    }
+    case 'get_thread': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const { threadId, messages } = await getThread(email, str(args.thread_id, 'thread_id'), listAccounts().map((a) => a.email));
+      if (!messages.length) return 'That thread has no messages.';
+      const notes = messages.flatMap((m, i) => m.security.map((w) => `message ${i + 1}: ${w}`));
+      const text = messages.map((m, i) => [
+        `### ${i + 1}/${messages.length}  ID: ${m.id}`,
+        `From: ${m.from}`, `To: ${m.to}`, `Date: ${m.date}`,
+        m.attachments.length ? `Attachments: ${m.attachments.map((a) => `[part ${a.part}] ${a.filename} (${a.size} bytes)`).join('; ')}` : null,
+        '', m.body,
+      ].filter((l) => l !== null).join('\n')).join('\n\n');
+      return `Thread ${threadId}, ${messages.length} message${messages.length === 1 ? '' : 's'}. Subject: ${messages[0].subject}\n\n` +
+        securityNotes(notes) + untrusted(text);
     }
     case 'get_email': {
       const m = await getMessage(resolveAccount(str(args.account, 'account')), str(args.message_id, 'message_id'));
@@ -376,6 +485,20 @@ async function call(name, rawArgs) {
       const rows = recentChanges(args.limit, acc ? resolveAccount(acc) : undefined);
       if (!rows.length) return 'No changes recorded yet.';
       return rows.map((r) => `${r.time}  ${r.tool}  ${JSON.stringify(r.args)}\n    -> ${r.result}`).join('\n');
+    }
+    case 'newsletters': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const query = str(args.query, 'query', { optional: true }) ?? 'newer_than:90d';
+      const top = Math.min(Math.max(Number(args.top) || 30, 1), 200);
+      const { scanned, lists } = await newsletters(email, query, args.max);
+      if (!lists.length) return `No mailing lists found in ${email} for "${query}".`;
+      const rows = lists.slice(0, top).map((l) => {
+        const how = l.web ? l.web : l.mail ? l.mail : 'no link declared';
+        const flags = [l.oneClick ? 'one-click' : null, l.web && baseDomain(new URL(l.web).hostname) !== baseDomain(l.address.split('@')[1]) ? 'link on another domain' : null]
+          .filter(Boolean).join(', ');
+        return `${String(l.count).padStart(4)} (${l.unread} unread)  ${l.address}${l.name && l.name !== l.address ? `  (${l.name})` : ''}\n      unsubscribe: ${how}${flags ? `  [${flags}]` : ''}`;
+      });
+      return `Scanned ${scanned} emails in ${email} for "${query}": ${lists.length} lists. Unsubscribing is up to you; this server only reports.\n\n` + untrusted(rows.join('\n'));
     }
     case 'list_labels': {
       const all = await labels(resolveAccount(str(args.account, 'account')));
@@ -484,6 +607,36 @@ async function call(name, rawArgs) {
       const sendAs = str(args.send_as, 'send_as', { optional: true });
       await setSignature(email, sendAs, args.signature);
       return args.signature ? `Signature updated for ${sendAs ?? email}.` : `Signature removed for ${sendAs ?? email}.`;
+    }
+    case 'list_drafts': {
+      const email = resolveAccount(str(args.account, 'account'));
+      const drafts = await listDrafts(email, args.max);
+      if (!drafts.length) return `No drafts in ${email}.`;
+      return untrusted(drafts.map((d) => [
+        `Draft ID: ${d.id}`, `To: ${d.to || '(none)'}`, `Subject: ${d.subject || '(none)'}`, `Date: ${d.date}`,
+        d.attachments.length ? `Attachments: ${d.attachments.join(', ')}` : null,
+        d.threadId ? `Reply in thread: ${d.threadId}` : null,
+        `Snippet: ${d.snippet}`,
+      ].filter((l) => l !== null).join('\n')).join('\n\n---\n\n'));
+    }
+    case 'update_draft': {
+      if (args.keep_attachments !== undefined && typeof args.keep_attachments !== 'boolean') throw new Error('keep_attachments must be true or false.');
+      const edits = {
+        to: str(args.to, 'to', { optional: true }),
+        cc: str(args.cc, 'cc', { optional: true }),
+        subject: str(args.subject, 'subject', { optional: true }),
+        body: str(args.body, 'body', { optional: true }),
+      };
+      const paths = list(args.attachments, 'attachments');
+      const dropping = args.keep_attachments === false;
+      if (!Object.values(edits).some((v) => v !== undefined) && !paths.length && !dropping) {
+        throw new Error('Nothing to change: pass to, cc, subject, body, attachments or keep_attachments: false.');
+      }
+      const email = resolveAccount(str(args.account, 'account'));
+      const files = paths.map((p) => readAttachable(p, { dirs: attachDirs(), configDir: DIR }));
+      const { id, attachments } = await updateDraft(email, str(args.draft_id, 'draft_id'), { ...edits, attachments: files, keepAttachments: !dropping });
+      const total = attachments.length ? ` Attachments now: ${attachments.join(', ')}.` : ' It has no attachments now.';
+      return `Draft ${id} updated.${total} It was not sent: it's still waiting in Drafts for you to review.`;
     }
     case 'create_draft': {
       const files = list(args.attachments, 'attachments').map((p) => readAttachable(p, { dirs: attachDirs(), configDir: DIR }));

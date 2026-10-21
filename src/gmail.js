@@ -14,13 +14,44 @@ function api(email) {
   return google.gmail({ version: 'v1', auth: authedClient(email) });
 }
 
+function isQuotaError(err) {
+  const code = err?.code ?? err?.response?.status;
+  const reason = JSON.stringify(err?.errors ?? err?.response?.data ?? '');
+  return code === 429 || (code === 403 && /rateLimit|quota/i.test(reason));
+}
+
 async function run(email, fn) {
   try {
     return await fn(api(email));
   } catch (err) {
     if (isTokenError(err)) throw new Error(`Access to ${email} expired or was revoked. Reconnect it with connect_account.`);
+    if (isQuotaError(err)) throw new Error(`Gmail is rate-limiting ${email} for about a minute. Wait a bit, or scan fewer emails (max).`);
     throw err;
   }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Fetches many messages a few at a time. When Gmail answers with a quota error the
+// batch waits and retries (up to about a minute and a half in total, which covers
+// Gmail's per-minute window), so a big scan slows down instead of dying halfway.
+const BACKOFF_MS = [2000, 4000, 8000, 16000, 25000, 35000];
+
+async function fetchEach(ids, fn, size = 10) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += size) {
+    const slice = ids.slice(i, i + size);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        out.push(...(await Promise.all(slice.map(fn))));
+        break;
+      } catch (err) {
+        if (!isQuotaError(err) || attempt >= BACKOFF_MS.length) throw err;
+        await sleep(BACKOFF_MS[attempt]);
+      }
+    }
+  }
+  return out;
 }
 
 // Header values from Gmail are third-party text. Control characters are removed so a
@@ -91,8 +122,9 @@ export function search(email, query, maxResults = 10) {
   const n = Math.min(Math.max(Number(maxResults) || 10, 1), 50);
   return run(email, async (g) => {
     const { data } = await g.users.messages.list({ userId: 'me', q: query, maxResults: n });
-    return Promise.all(
-      (data.messages ?? []).map(async ({ id }) => {
+    return fetchEach(
+      (data.messages ?? []).map((m) => m.id),
+      async (id) => {
         const { data: m } = await g.users.messages.get({
           userId: 'me',
           id,
@@ -102,13 +134,14 @@ export function search(email, query, maxResults = 10) {
         const h = m.payload?.headers;
         return {
           id: m.id,
+          threadId: m.threadId,
           from: header(h, 'From'),
           subject: header(h, 'Subject'),
           date: header(h, 'Date'),
           snippet: stripInvisible(m.snippet ?? '').text.replace(/[\u0000-\u001f\u007f]+/g, ' '),
           labels: m.labelIds ?? [],
         };
-      })
+      }
     );
   });
 }
@@ -197,19 +230,14 @@ export function senderStats(email, query, max = 500) {
       if (!pageToken) break;
     }
     const senders = new Map();
-    for (let i = 0; i < ids.length; i += 20) {
-      const batch = await Promise.all(
-        ids.slice(i, i + 20).map((id) =>
-          g.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From'] }).then(({ data }) => header(data.payload?.headers, 'From'))
-        )
-      );
-      for (const from of batch) {
-        const address = senderAddress(from);
-        if (!address) continue;
-        const s = senders.get(address) ?? { address, name: from.replace(/<[^>]*>/, '').replace(/"/g, '').trim(), count: 0 };
-        s.count++;
-        senders.set(address, s);
-      }
+    const froms = await fetchEach(ids, (id) =>
+      g.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From'] }).then(({ data }) => header(data.payload?.headers, 'From')));
+    for (const from of froms) {
+      const address = senderAddress(from);
+      if (!address) continue;
+      const s = senders.get(address) ?? { address, name: from.replace(/<[^>]*>/, '').replace(/"/g, '').trim(), count: 0 };
+      s.count++;
+      senders.set(address, s);
     }
     return { scanned: ids.length, senders: [...senders.values()].sort((a, b) => b.count - a.count) };
   });
@@ -438,5 +466,183 @@ export function createDraft(email, { to, cc, subject, body, replyTo, attachments
       requestBody: { message: { raw: Buffer.from(raw).toString('base64url'), threadId } },
     });
     return data.id;
+  });
+}
+
+
+// --- Threads ------------------------------------------------------------------
+
+// Drops the quoted history that each reply repeats ("El lun, ... escribió:" and the
+// "> " lines after it), so a long thread fits and each message shows what it added.
+export function trimQuoted(text) {
+  const lines = String(text).split('\n');
+  const cut = lines.findIndex((l, i) =>
+    /^\s*(On .{4,200} wrote:|El .{4,200} escribi[oó]:|-{2,}\s*(Original Message|Mensaje original)\s*-{2,}|From: .+ <.+@.+>)\s*$/i.test(l) &&
+    lines.slice(i + 1, i + 4).some((n) => /^\s*>|^\s*$/.test(n)));
+  const kept = (cut >= 0 ? lines.slice(0, cut) : lines).filter((l) => !/^\s*>/.test(l));
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+const MAX_THREAD = 60_000;
+
+// A whole conversation, oldest first. Accepts a thread ID or the ID of any message in it.
+export function getThread(email, id, own = []) {
+  return run(email, async (g) => {
+    let threadId = id;
+    let data;
+    try {
+      data = (await g.users.threads.get({ userId: 'me', id: threadId, format: 'full' })).data;
+    } catch {
+      threadId = (await g.users.messages.get({ userId: 'me', id, format: 'minimal' })).data.threadId;
+      data = (await g.users.threads.get({ userId: 'me', id: threadId, format: 'full' })).data;
+    }
+    const messages = (data.messages ?? []).map((m, i, all) => {
+      const h = m.payload?.headers;
+      const cleaned = stripInvisible(extractBody(m.payload));
+      const body = i === 0 ? cleaned.text.trim() : trimQuoted(cleaned.text);
+      const security = mailRisks({
+        from: header(h, 'From'),
+        replyTo: header(h, 'Reply-To'),
+        authResults: header(h, 'Authentication-Results'),
+        html: firstHtml(m.payload),
+        bulk: Boolean(header(h, 'List-Unsubscribe') || header(h, 'List-Id')),
+        own,
+      });
+      if (cleaned.tags) security.push(`${cleaned.tags} invisible "tag" characters were removed: they are used to hide instructions for AI`);
+      for (const why of injectionSignals(body)) security.push(`possible prompt injection: ${why}`);
+      return {
+        id: m.id,
+        from: header(h, 'From'),
+        to: header(h, 'To'),
+        date: header(h, 'Date'),
+        subject: header(h, 'Subject'),
+        attachments: listAttachments(m.payload).map(({ part, filename, size }) => ({ part, filename, size })),
+        body,
+        security,
+        last: i === all.length - 1,
+      };
+    });
+    // Over budget, older messages shrink first: the latest ones matter most for a reply.
+    let total = messages.reduce((n, m) => n + m.body.length, 0);
+    for (const m of messages) {
+      if (total <= MAX_THREAD || m.last) break;
+      const keep = Math.max(400, m.body.length - (total - MAX_THREAD));
+      if (keep < m.body.length) {
+        total -= m.body.length - keep;
+        m.body = m.body.slice(0, keep) + '\n[... shortened to fit the thread ...]';
+      }
+    }
+    return { threadId, messages };
+  });
+}
+
+// --- Newsletters --------------------------------------------------------------
+
+// Parses List-Unsubscribe ("<https://...>, <mailto:...>") into its links.
+export function unsubscribeLinks(value = '') {
+  const links = [...String(value).matchAll(/<([^>]+)>/g)].map((m) => m[1].trim());
+  return {
+    web: links.find((l) => /^https:\/\//i.test(l)) ?? links.find((l) => /^http:\/\//i.test(l)) ?? null,
+    mail: links.find((l) => /^mailto:/i.test(l)) ?? null,
+  };
+}
+
+// Mailing lists that wrote in a period, by volume, with how to leave each one.
+// It only reports: unsubscribing means visiting a site or sending mail, which is the
+// user's call, not something this server does on its own.
+export function newsletters(email, query, max = 500) {
+  const limit = Math.min(Math.max(Number(max) || 500, 1), 2000);
+  return run(email, async (g) => {
+    const ids = [];
+    let pageToken;
+    while (ids.length < limit) {
+      const { data } = await g.users.messages.list({ userId: 'me', q: query, maxResults: Math.min(500, limit - ids.length), pageToken });
+      ids.push(...(data.messages ?? []).map((m) => m.id));
+      pageToken = data.nextPageToken;
+      if (!pageToken) break;
+    }
+    const lists = new Map();
+    const metas = await fetchEach(ids, (id) =>
+      g.users.messages.get({ userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'List-Unsubscribe', 'List-Unsubscribe-Post', 'Date'] })
+        .then(({ data }) => data));
+    {
+      for (const m of metas) {
+        const h = m.payload?.headers;
+        const unsub = header(h, 'List-Unsubscribe');
+        if (!unsub) continue;
+        const address = senderAddress(header(h, 'From'));
+        if (!address) continue;
+        const entry = lists.get(address) ?? {
+          address,
+          name: header(h, 'From').replace(/<[^>]*>/, '').replace(/"/g, '').trim(),
+          count: 0,
+          unread: 0,
+          oneClick: false,
+          ...unsubscribeLinks(unsub),
+          last: header(h, 'Date'),
+        };
+        entry.count++;
+        if ((m.labelIds ?? []).includes('UNREAD')) entry.unread++;
+        if (/One-Click/i.test(header(h, 'List-Unsubscribe-Post'))) entry.oneClick = true;
+        lists.set(address, entry);
+      }
+    }
+    return { scanned: ids.length, lists: [...lists.values()].sort((a, b) => b.count - a.count) };
+  });
+}
+
+// --- Editing drafts -----------------------------------------------------------
+
+export function listDrafts(email, max = 20) {
+  const n = Math.min(Math.max(Number(max) || 20, 1), 100);
+  return run(email, async (g) => {
+    const { data } = await g.users.drafts.list({ userId: 'me', maxResults: n });
+    return fetchEach((data.drafts ?? []).map((d) => d.id), async (id) => {
+      const { data: d } = await g.users.drafts.get({ userId: 'me', id, format: 'full' });
+      const h = d.message?.payload?.headers;
+      return {
+        id,
+        to: header(h, 'To'),
+        subject: header(h, 'Subject'),
+        date: header(h, 'Date'),
+        attachments: listAttachments(d.message?.payload).map((a) => a.filename),
+        snippet: stripInvisible(d.message?.snippet ?? '').text,
+        threadId: d.message?.threadId,
+      };
+    });
+  });
+}
+
+// Rewrites a draft keeping whatever isn't given: recipients, subject, text, the
+// thread it answers and its current attachments. Gmail only replaces drafts whole,
+// so the old attachments are read back and sent again unless asked to drop them.
+export function updateDraft(email, id, { to, cc, subject, body, attachments = [], keepAttachments = true }) {
+  return run(email, async (g) => {
+    const { data: d } = await g.users.drafts.get({ userId: 'me', id, format: 'full' });
+    const m = d.message;
+    const h = m?.payload?.headers;
+    const kept = [];
+    if (keepAttachments) {
+      for (const a of listAttachments(m?.payload)) {
+        const data = a.data ?? (await g.users.messages.attachments.get({ userId: 'me', messageId: m.id, id: a.attachmentId })).data.data;
+        kept.push({ filename: a.filename, mimeType: a.mimeType, bytes: Buffer.from(data, 'base64url') });
+      }
+    }
+    const raw = buildDraft({
+      from: email,
+      to: to ?? header(h, 'To'),
+      cc: cc ?? (header(h, 'Cc') || undefined),
+      subject: subject ?? (header(h, 'Subject') || undefined),
+      body: body ?? extractBody(m?.payload),
+      inReplyTo: header(h, 'In-Reply-To') || undefined,
+      references: header(h, 'References') || undefined,
+      attachments: [...kept, ...attachments],
+    });
+    const { data } = await g.users.drafts.update({
+      userId: 'me',
+      id,
+      requestBody: { id, message: { raw: Buffer.from(raw).toString('base64url'), threadId: m?.threadId } },
+    });
+    return { id: data.id, attachments: [...kept, ...attachments].map((a) => a.filename) };
   });
 }

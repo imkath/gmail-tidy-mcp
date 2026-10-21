@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.imkath/gmail-tidy-mcp",
-  "description": "Organize several Gmail accounts: labels, filters, archiving, drafts. Never sends or deletes mail.",
+  "description": "Organize Gmail accounts: threads, attachments, labels, filters, drafts. Never sends or deletes.",
   "repository": {
     "url": "https://github.com/imkath/gmail-tidy-mcp",
     "source": "github"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "gmail-tidy-mcp",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "transport": {
         "type": "stdio"
       }

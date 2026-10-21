@@ -20,11 +20,11 @@ This one is built around a smaller promise: the assistant can help you get your 
 | Area | Tools |
 |---|---|
 | Accounts | `list_accounts`, `check_accounts`, `connect_account`, `finish_connect_account` |
-| Reading | `search_emails` (Gmail search syntax), `get_email` (lists attachments), `get_attachment` (text, `.gz` and `.zip` are read inline, e.g. DMARC reports; anything else, like a PDF, is saved to `~/Downloads/gmail-tidy-mcp`), `sender_stats` (who writes most, by address and domain) |
+| Reading | `search_emails` (Gmail search syntax), `search_all_accounts` (one search, every account), `get_email` (lists attachments), `get_thread` (a whole conversation, oldest first, quoted history trimmed), `get_attachment` (text, `.gz` and `.zip` are read inline, e.g. DMARC reports; anything else, like a PDF, is saved to `~/Downloads/gmail-tidy-mcp`), `sender_stats` (who writes most, by address and domain), `newsletters` (mailing lists by volume with the unsubscribe link each declares; it never unsubscribes for you) |
 | Labels | `list_labels`, `create_label` (nest with `Parent/Child`), `update_label` (rename, recolor with the Gmail palette, show or hide in the sidebar) |
 | Organizing | `organize_emails`: add or remove labels by ID or by search, up to 5,000 messages at a time. Archive = remove `INBOX`, mark as read = remove `UNREAD` |
 | Filters | `list_filters`, `create_filter`, `delete_filter`. A filter that skips the inbox needs an explicit `skip_inbox: true` |
-| Drafts | `create_draft`, optionally as a reply inside a thread and with local files attached. You send it yourself from Gmail |
+| Drafts | `create_draft`, optionally as a reply inside a thread and with local files attached; `list_drafts`; `update_draft` edits an existing draft (only the fields you pass change, the thread and current attachments stay). You send it yourself from Gmail |
 | Settings | `set_signature`: changes only the signature, never how mail goes out |
 | Audit | `recent_changes`: every change this server made, to review or undo a session |
 
@@ -52,6 +52,7 @@ Google has no scope that allows drafts but not sending, so the server asks for `
 - **Dangerous attachments are not saved.** Executables and scripts, disguised names (`factura.pdf.exe`, right-to-left override tricks), files whose bytes don't match their extension, and archives that contain any of those are refused unless the call says `allow_risky: true`. Password-protected archives, macro-enabled Office files and PDFs with JavaScript or auto-run actions are flagged. Saved files never overwrite anything, can't be written outside the downloads folder, and on macOS get the quarantine flag so Gatekeeper checks them before they open.
 - **Drafts can't smuggle headers.** Line breaks in To, Cc, Subject or the reply headers are rejected, so nobody can sneak in a hidden Bcc.
 - **Arguments are validated** before anything reaches Gmail, and the tools that change things carry MCP annotations (`destructiveHint`) so clients can ask you before running them.
+- **Big scans respect Gmail's quota.** `sender_stats`, `newsletters` and searches fetch a few messages at a time and back off when Gmail asks, so a large mailbox slows the scan down instead of breaking it.
 - Two runtime dependencies (`@modelcontextprotocol/sdk` and `googleapis`), pinned to exact versions, none with install scripts.
 
 ### What could still go wrong
@@ -62,7 +63,7 @@ No server can make prompt injection impossible, and the security notes are heuri
 - create a filter that hides new mail from the inbox (only with `skip_inbox: true`, and your client can ask you first),
 - delete one of your filters (filters can't be recovered),
 - write a misleading draft. It is never sent unless you send it,
-- rename or recolor a label, or change your signature (all reversible),
+- rename or recolor a label, change your signature, or rewrite one of your drafts (all reversible: the audit log keeps what changed),
 - save an attachment flagged as dangerous, if it also sets `allow_risky: true`; opening it is still up to you.
 
 Two more things worth knowing:
