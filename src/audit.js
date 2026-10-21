@@ -14,7 +14,7 @@ const KEEP = {
   update_label: ['account', 'label', 'new_name', 'background', 'sidebar', 'in_message_list'],
   create_filter: ['account', 'from', 'to', 'subject', 'query', 'add_labels', 'remove_labels', 'skip_inbox'],
   delete_filter: ['account', 'filter_id'],
-  create_draft: ['account', 'to', 'cc', 'subject', 'reply_to_id'],
+  create_draft: ['account', 'to', 'cc', 'subject', 'reply_to_id', 'attachments'],
   set_signature: ['account', 'send_as'],
   get_attachment: ['account', 'message_id', 'attachment', 'allow_risky'],
   connect_account: ['email', 'label'],

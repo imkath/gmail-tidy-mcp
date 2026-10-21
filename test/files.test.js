@@ -54,3 +54,34 @@ test('saving never overwrites an existing file', () => {
   assert.deepEqual(readdirSync(dir).sort(), ['factura (2).pdf', 'factura.pdf']);
   assert.equal(readFileSync(join(dir, 'factura.pdf'), 'utf8'), 'one');
 });
+
+import { mkdirSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { readAttachable } from '../src/files.js';
+
+test('drafts only attach files from the allowed folders', () => {
+  const home = mkdtempSync(join(tmpdir(), 'gmail-tidy-attach-'));
+  const docs = join(home, 'Documents');
+  const config = join(home, '.config', 'gmail-tidy-mcp');
+  mkdirSync(join(docs, '.private'), { recursive: true });
+  mkdirSync(join(home, '.ssh'), { recursive: true });
+  mkdirSync(config, { recursive: true });
+  writeFileSync(join(docs, 'Cotización.pdf'), '%PDF-1.7');
+  writeFileSync(join(docs, '.private', 'notes.txt'), 'x');
+  writeFileSync(join(home, '.ssh', 'id_ed25519'), 'KEY');
+  writeFileSync(join(config, 'tokens.enc'), 'T');
+  symlinkSync(join(home, '.ssh', 'id_ed25519'), join(docs, 'innocent.pdf'));
+  const opts = { dirs: [docs, config], configDir: config };
+
+  const ok = readAttachable(join(docs, 'Cotización.pdf'), opts);
+  assert.equal(ok.filename, 'Cotización.pdf');
+  assert.equal(ok.mimeType, 'application/pdf');
+  assert.throws(() => readAttachable(join(home, '.ssh', 'id_ed25519'), opts), /outside the folders/);
+  assert.throws(() => readAttachable(join(docs, 'innocent.pdf'), opts), /outside the folders/); // link resolved first
+  assert.throws(() => readAttachable(join(docs, '.private', 'notes.txt'), opts), /hidden/);
+  assert.throws(() => readAttachable(join(config, 'tokens.enc'), { dirs: [config], configDir: config }), /hidden|own files/);
+  assert.throws(() => readAttachable(join(docs, 'missing.pdf'), opts), /no file/);
+  assert.throws(() => readAttachable(docs, opts), /not a file/);
+  writeFileSync(join(docs, 'big.mov'), '');
+  truncateSync(join(docs, 'big.mov'), 26 * 1024 * 1024);
+  assert.throws(() => readAttachable(join(docs, 'big.mov'), opts), /25 MB/);
+});

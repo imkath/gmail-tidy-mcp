@@ -6,13 +6,13 @@ import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { listAccounts, resolveAccount, saveAccount } from './store.js';
+import { DIR, listAccounts, resolveAccount, saveAccount } from './store.js';
 import { startLogin, openBrowser } from './auth.js';
 import {
   search, getMessage, getAttachment, senderStats, labels, profile, createLabel, updateLabel, setSignature, relabel,
   listFilters, createFilter, deleteFilter, createDraft,
 } from './gmail.js';
-import { DOWNLOADS, MAX_INLINE, readableText, saveFile } from './files.js';
+import { DOWNLOADS, MAX_ATTACH_BYTES, MAX_INLINE, attachDirs, readAttachable, readableText, saveFile } from './files.js';
 import { attachmentRisks, injectionSignals, stripInvisible } from './security.js';
 import { recentChanges, recordChange } from './audit.js';
 
@@ -286,7 +286,9 @@ const TOOLS = [
     annotations: CHANGES,
     description:
       'Creates a draft. It is NOT sent: the user reviews and sends it from Gmail. ' +
-      'With reply_to_id it goes into that thread as a reply.',
+      'With reply_to_id it goes into that thread as a reply. attachments takes paths of local files ' +
+      '(only from Downloads, Desktop or Documents, never hidden folders; up to 24 MB in total). ' +
+      'Only attach files the user asked for.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -296,6 +298,7 @@ const TOOLS = [
         subject: { type: 'string' },
         body: { type: 'string' },
         reply_to_id: { type: 'string', description: 'ID of the email being answered (optional)' },
+        attachments: { type: 'array', items: { type: 'string' }, description: 'Paths of local files to attach (optional)' },
       },
       required: ['account', 'body'],
     },
@@ -483,14 +486,19 @@ async function call(name, rawArgs) {
       return args.signature ? `Signature updated for ${sendAs ?? email}.` : `Signature removed for ${sendAs ?? email}.`;
     }
     case 'create_draft': {
+      const files = list(args.attachments, 'attachments').map((p) => readAttachable(p, { dirs: attachDirs(), configDir: DIR }));
+      const total = files.reduce((n, f) => n + f.bytes.length, 0);
+      if (total > MAX_ATTACH_BYTES) throw new Error(`The attachments add up to ${(total / 1048576).toFixed(1)} MB; Gmail takes up to 25 MB per email.`);
       const id = await createDraft(resolveAccount(str(args.account, 'account')), {
+        attachments: files,
         to: str(args.to, 'to', { optional: true }),
         cc: str(args.cc, 'cc', { optional: true }),
         subject: str(args.subject, 'subject', { optional: true }),
         body: str(args.body, 'body'),
         replyTo: str(args.reply_to_id, 'reply_to_id', { optional: true }),
       });
-      return `Draft created (${id}). It was not sent: it's waiting in Drafts for you to review.`;
+      const listed = files.length ? ` with ${files.map((f) => `${f.filename} (${Math.ceil(f.bytes.length / 1024)} KB)`).join(', ')}` : '';
+      return `Draft created (${id})${listed}. It was not sent: it's waiting in Drafts for you to review.`;
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

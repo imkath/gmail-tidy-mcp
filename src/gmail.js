@@ -373,7 +373,18 @@ export function encodeAddresses(list) {
     .join(', ');
 }
 
-export function buildDraft({ from, to, cc, subject, body, inReplyTo, references }) {
+// Content-Disposition for a file name. Gmail shows the plain filename parameter and
+// ignores the RFC 2231 form, so a name with accents (Cotización.pdf) goes as an
+// encoded-word there, the way Gmail itself writes it, plus filename* for strict clients.
+export function dispositionFor(filename) {
+  const name = noNewlines(String(filename), 'attachment name');
+  if (!/[^\x20-\x7e]/.test(name)) return `attachment; filename="${name.replace(/["\\]/g, '_')}"`;
+  const word = `=?UTF-8?B?${Buffer.from(name).toString('base64')}?=`;
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${word}"; filename*=UTF-8''${encoded}`;
+}
+
+export function buildDraft({ from, to, cc, subject, body, inReplyTo, references, attachments = [], boundary }) {
   if (!to) throw new Error('A draft needs a recipient (to), or reply_to_id to answer an email.');
   const lines = [
     `From: ${noNewlines(from, 'from')}`,
@@ -383,14 +394,25 @@ export function buildDraft({ from, to, cc, subject, body, inReplyTo, references 
     inReplyTo ? `In-Reply-To: ${noNewlines(inReplyTo, 'In-Reply-To')}` : null,
     references ? `References: ${noNewlines(references, 'References')}` : null,
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: 8bit',
   ].filter(Boolean);
-  return `${lines.join('\r\n')}\r\n\r\n${String(body ?? '').replace(/\r?\n/g, '\r\n')}`;
+  const text = String(body ?? '').replace(/\r?\n/g, '\r\n');
+  if (!attachments.length) {
+    return `${[...lines, 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: 8bit'].join('\r\n')}\r\n\r\n${text}`;
+  }
+  const b = boundary ?? `gmail-tidy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const parts = [
+    `--${b}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n${text}`,
+    ...attachments.map((a) => {
+      const type = noNewlines(String(a.mimeType || 'application/octet-stream'), 'attachment type');
+      const data = Buffer.from(a.bytes).toString('base64').replace(/.{76}/g, '$&\r\n');
+      return `--${b}\r\nContent-Type: ${type}\r\nContent-Disposition: ${dispositionFor(a.filename)}\r\nContent-Transfer-Encoding: base64\r\n\r\n${data}`;
+    }),
+  ];
+  return `${[...lines, `Content-Type: multipart/mixed; boundary="${b}"`].join('\r\n')}\r\n\r\n${parts.join('\r\n')}\r\n--${b}--\r\n`;
 }
 
 // Only creates the draft. Sending it is up to you, from Gmail.
-export function createDraft(email, { to, cc, subject, body, replyTo }) {
+export function createDraft(email, { to, cc, subject, body, replyTo, attachments = [] }) {
   return run(email, async (g) => {
     let threadId;
     let inReplyTo;
@@ -410,7 +432,7 @@ export function createDraft(email, { to, cc, subject, body, replyTo }) {
       inReplyTo = header(h, 'Message-ID') || undefined;
       references = [header(h, 'References'), inReplyTo].filter(Boolean).join(' ') || undefined;
     }
-    const raw = buildDraft({ from: email, to, cc, subject, body, inReplyTo, references });
+    const raw = buildDraft({ from: email, to, cc, subject, body, inReplyTo, references, attachments });
     const { data } = await g.users.drafts.create({
       userId: 'me',
       requestBody: { message: { raw: Buffer.from(raw).toString('base64url'), threadId } },

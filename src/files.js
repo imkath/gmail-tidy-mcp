@@ -2,10 +2,10 @@
 // be shown as text, and save the rest under one folder. A file name comes from the
 // sender, so it's reduced to a bare name before it touches the disk.
 import { gunzipSync, inflateRawSync } from 'node:zlib';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, relative, sep } from 'node:path';
 
 export const MAX_INLINE = 40_000;
 const MAX_UNPACKED = 20 * 1024 * 1024; // zip bomb guard
@@ -104,4 +104,61 @@ export function quarantine(path) {
   } catch {
     return false;
   }
+}
+
+// --- Attaching local files to drafts ------------------------------------------
+// A draft is never sent, but a model steered by a malicious email could still try to
+// put a private file (an SSH key, this server's own tokens) into a draft addressed to
+// someone else, hoping you send it without looking. So only files under a few user
+// folders can be attached, never hidden folders, and links are resolved first.
+
+export const MAX_ATTACH_BYTES = 24 * 1024 * 1024; // Gmail's limit is 25 MB per message
+
+export function attachDirs() {
+  const custom = process.env.GMAIL_TIDY_ATTACH_DIRS;
+  if (custom) return custom.split(':').filter(Boolean);
+  return ['Downloads', 'Desktop', 'Documents'].map((d) => join(homedir(), d)).concat(DOWNLOADS);
+}
+
+const MIME = {
+  '.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'text/csv', '.md': 'text/markdown', '.html': 'text/html',
+  '.json': 'application/json', '.xml': 'application/xml', '.zip': 'application/zip', '.png': 'image/png',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel', '.ppt': 'application/vnd.ms-powerpoint',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.ics': 'text/calendar', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+};
+
+export function mimeType(filename) {
+  return MIME[extname(filename).toLowerCase()] ?? 'application/octet-stream';
+}
+
+// Returns { filename, mimeType, bytes } or throws with the reason in plain words.
+export function readAttachable(path, { dirs = attachDirs(), configDir } = {}) {
+  const expanded = String(path).replace(/^~(?=\/|$)/, homedir());
+  let real;
+  try {
+    real = realpathSync(expanded);
+  } catch {
+    throw new Error(`There is no file at ${path}.`);
+  }
+  const roots = dirs.map((d) => {
+    try { return realpathSync(d); } catch { return null; }
+  }).filter(Boolean);
+  const root = roots.find((r) => real === r || real.startsWith(r + sep));
+  if (!root) throw new Error(`${path} is outside the folders drafts can attach from (${dirs.join(', ')}).`);
+  if (relative(root, real).split(sep).some((part) => part.startsWith('.'))) {
+    throw new Error(`${path} is in a hidden folder or is a hidden file; those can't be attached.`);
+  }
+  if (configDir) {
+    let conf = null;
+    try { conf = realpathSync(configDir); } catch { /* not created yet */ }
+    if (conf && (real === conf || real.startsWith(conf + sep))) throw new Error("This server's own files can't be attached.");
+  }
+  const info = statSync(real);
+  if (!info.isFile()) throw new Error(`${path} is not a file.`);
+  if (info.size > MAX_ATTACH_BYTES) throw new Error(`${path} is ${(info.size / 1048576).toFixed(1)} MB; Gmail takes up to 25 MB per email.`);
+  return { filename: basename(real), mimeType: mimeType(real), bytes: readFileSync(real) };
 }

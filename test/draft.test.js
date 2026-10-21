@@ -33,3 +33,21 @@ test('omits empty optional headers', () => {
 test('quotes plain display names and leaves bare addresses alone', () => {
   assert.equal(encodeAddresses('Ana <ana@x.com>, bob@y.com'), '"Ana" <ana@x.com>, bob@y.com');
 });
+
+test('a draft with attachments is multipart and keeps the text intact', () => {
+  const raw = buildDraft({
+    ...base, body: 'Adjunto la cotización.\nSaludos', boundary: 'B1',
+    attachments: [{ filename: 'Cotización final.pdf', mimeType: 'application/pdf', bytes: Buffer.from('%PDF-1.7 test') }],
+  });
+  assert.match(raw, /^Content-Type: multipart\/mixed; boundary="B1"$/m);
+  assert.match(raw, /--B1\r\nContent-Type: text\/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\nAdjunto la cotización\.\r\nSaludos/);
+  const word = `=?UTF-8?B?${Buffer.from('Cotización final.pdf').toString('base64')}?=`;
+  assert.ok(raw.includes(`filename="${word}"; filename*=UTF-8''Cotizaci%C3%B3n%20final.pdf`));
+  assert.ok(raw.includes(Buffer.from('%PDF-1.7 test').toString('base64')));
+  assert.ok(raw.trimEnd().endsWith('--B1--'));
+  assert.ok(!/[^\x00-\x7f]/.test(raw.split('\r\n\r\n')[0]), 'headers must be ASCII');
+});
+
+test('an attachment name cannot smuggle headers', () => {
+  assert.throws(() => buildDraft({ ...base, attachments: [{ filename: 'a.pdf\r\nBcc: evil@x.com', bytes: Buffer.from('x') }] }), /line breaks/);
+});
