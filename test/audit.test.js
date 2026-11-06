@@ -22,6 +22,7 @@ test('records changes, skips reads, and the log is private', () => {
   const rows = recentChanges();
   assert.deepEqual(rows.map((r) => r.tool), ['organize_emails', 'get_attachment']);
   assert.deepEqual(recentChanges(20, 'b@example.com').map((r) => r.args.message_id), ['2']);
-  assert.equal(statSync(AUDIT_FILE).mode & 0o777, 0o600);
+  // Windows has no POSIX modes (it reports 0o666); there the profile folder ACLs keep the log private.
+  if (process.platform !== 'win32') assert.equal(statSync(AUDIT_FILE).mode & 0o777, 0o600);
   assert.ok(!readFileSync(AUDIT_FILE, 'utf8').includes('notes.txt'));
 });
