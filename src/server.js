@@ -85,8 +85,16 @@ const CHANGES = { readOnlyHint: false, destructiveHint: false, openWorldHint: tr
 const RISKY = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 
 const TOOLS = [
-  { name: 'list_accounts',
-    annotations: READ, description: 'Lists the connected Gmail accounts and their labels.', inputSchema: { type: 'object', properties: {} } },
+  {
+    name: 'list_accounts',
+    annotations: READ,
+    description:
+      'Lists the Gmail accounts connected to this server: the short name each one was given, its address and its ' +
+      'Gmail labels. Read-only; it uses the tokens stored locally and makes one request per account. Call it first ' +
+      'to learn the account names that every other tool expects in its account parameter. If an account has lost ' +
+      'access, it says so; reconnect it with connect_account.',
+    inputSchema: { type: 'object', properties: {} },
+  },
   { name: 'check_accounts',
     annotations: READ, description: 'Checks that every connected account still has valid access.', inputSchema: { type: 'object', properties: {} } },
   {
@@ -109,7 +117,11 @@ const TOOLS = [
     annotations: CHANGES,
     description:
       'Finishes connecting an account after the user signed in. Waits up to 45 seconds; if the user is not done yet, call it again.',
-    inputSchema: { type: 'object', properties: { email: { type: 'string' } }, required: ['email'] },
+    inputSchema: {
+      type: 'object',
+      properties: { email: { type: 'string', description: 'The address passed to connect_account' } },
+      required: ['email'],
+    },
   },
   {
     name: 'search_emails',
@@ -131,7 +143,7 @@ const TOOLS = [
     description: 'Reads a full email by ID.' + UNTRUSTED,
     inputSchema: {
       type: 'object',
-      properties: { account, message_id: { type: 'string' } },
+      properties: { account, message_id: { type: 'string', description: 'Email ID from search_emails, get_thread or list_drafts' } },
       required: ['account', 'message_id'],
     },
   },
@@ -172,7 +184,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         account,
-        message_id: { type: 'string' },
+        message_id: { type: 'string', description: 'Email ID from search_emails or get_thread' },
         attachment: { type: 'string', description: 'Part number from get_email, or the file name' },
         save: { type: 'boolean', description: 'Save to disk even if it is text' },
         allow_risky: {
@@ -231,13 +243,31 @@ const TOOLS = [
       required: ['account'],
     },
   },
-  { name: 'list_labels',
-    annotations: READ, description: 'Lists the labels of an account.', inputSchema: { type: 'object', properties: { account }, required: ['account'] } },
+  {
+    name: 'list_labels',
+    annotations: READ,
+    description:
+      'Lists every label of one account, system ones (INBOX, UNREAD, STARRED, SPAM...) and user ones, with the ID ' +
+      'and the name Gmail uses (nested labels appear as "Parent/Child"). Read-only, one request. Use it before ' +
+      'create_label, update_label, organize_emails or create_filter to reuse existing names instead of creating ' +
+      'near-duplicates.',
+    inputSchema: { type: 'object', properties: { account }, required: ['account'] },
+  },
   {
     name: 'create_label',
     annotations: CHANGES,
-    description: 'Creates a label. Use "Parent/Child" to nest it.',
-    inputSchema: { type: 'object', properties: { account, name: { type: 'string' } }, required: ['account', 'name'] },
+    description:
+      'Creates one new user label in an account. Use "Parent/Child" to nest it under an existing label. Gmail ' +
+      'rejects a name that already exists, so check list_labels first. Nothing else changes: no email is moved, ' +
+      'labeled or deleted. The change is written to the local audit log (see recent_changes).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account,
+        name: { type: 'string', description: 'Label name, e.g. "Receipts" or "Clients/Acme" to nest it' },
+      },
+      required: ['account', 'name'],
+    },
   },
   {
     name: 'update_label',
@@ -251,7 +281,7 @@ const TOOLS = [
       properties: {
         account,
         label: { type: 'string', description: 'Label name or ID' },
-        new_name: { type: 'string' },
+        new_name: { type: 'string', description: 'New name; "Parent/Child" moves it under Parent' },
         background: { type: 'string', description: 'Hex color from the Gmail palette' },
         text: { type: 'string', description: 'Hex text color (default #ffffff); needs background' },
         sidebar: { type: 'string', enum: ['show', 'hide', 'unread'], description: 'Sidebar visibility; unread = only when it has unread mail' },
@@ -270,7 +300,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         account,
-        message_ids: { type: 'array', items: { type: 'string' } },
+        message_ids: { type: 'array', items: { type: 'string' }, description: 'Email IDs to change (alternative to query)' },
         query: { type: 'string', description: 'Gmail search to select older mail' },
         max: { type: 'number', description: 'Cap when using query (default 500, max 5000)' },
         add_labels: labelList,
@@ -279,8 +309,15 @@ const TOOLS = [
       required: ['account'],
     },
   },
-  { name: 'list_filters',
-    annotations: READ, description: 'Lists the filters of an account.', inputSchema: { type: 'object', properties: { account }, required: ['account'] } },
+  {
+    name: 'list_filters',
+    annotations: READ,
+    description:
+      'Lists the filters of one account: each filter ID, what it matches (from, to, subject or a Gmail query) and ' +
+      'what it does (labels added or removed, inbox skipped). Read-only, one request. Use it before create_filter ' +
+      'to avoid duplicates and to find the ID that delete_filter needs.',
+    inputSchema: { type: 'object', properties: { account }, required: ['account'] },
+  },
   {
     name: 'create_filter',
     annotations: RISKY,
@@ -291,9 +328,9 @@ const TOOLS = [
       type: 'object',
       properties: {
         account,
-        from: { type: 'string' },
-        to: { type: 'string' },
-        subject: { type: 'string' },
+        from: { type: 'string', description: 'Sender address or domain to match' },
+        to: { type: 'string', description: 'Recipient address to match' },
+        subject: { type: 'string', description: 'Text the subject must contain' },
         query: { type: 'string', description: 'Gmail search the mail must match' },
         add_labels: labelList,
         remove_labels: labelList,
@@ -309,8 +346,15 @@ const TOOLS = [
   {
     name: 'delete_filter',
     annotations: RISKY,
-    description: 'Deletes a filter by ID. It does not touch any email.',
-    inputSchema: { type: 'object', properties: { account, filter_id: { type: 'string' } }, required: ['account', 'filter_id'] },
+    description:
+      'Permanently deletes one filter by ID, so Gmail stops applying it to new mail. There is no undo: to restore ' +
+      'it, create it again with create_filter (list_filters shows its criteria first). Emails the filter already ' +
+      'labeled or archived are left exactly as they are. The deletion is written to the local audit log.',
+    inputSchema: {
+      type: 'object',
+      properties: { account, filter_id: { type: 'string', description: 'Filter ID from list_filters' } },
+      required: ['account', 'filter_id'],
+    },
   },
   {
     name: 'set_signature',
@@ -349,10 +393,10 @@ const TOOLS = [
       properties: {
         account,
         draft_id: { type: 'string', description: 'From list_drafts or create_draft' },
-        to: { type: 'string' },
-        cc: { type: 'string' },
-        subject: { type: 'string' },
-        body: { type: 'string' },
+        to: { type: 'string', description: 'New recipients, comma separated' },
+        cc: { type: 'string', description: 'New CC recipients, comma separated' },
+        subject: { type: 'string', description: 'New subject' },
+        body: { type: 'string', description: 'New plain-text body (replaces the current one)' },
         attachments: { type: 'array', items: { type: 'string' }, description: 'Paths of local files to add' },
         keep_attachments: { type: 'boolean', description: 'false drops the attachments the draft already has (default true)' },
       },
@@ -371,10 +415,10 @@ const TOOLS = [
       type: 'object',
       properties: {
         account,
-        to: { type: 'string' },
-        cc: { type: 'string' },
-        subject: { type: 'string' },
-        body: { type: 'string' },
+        to: { type: 'string', description: 'Recipients, comma separated (optional for a reply)' },
+        cc: { type: 'string', description: 'CC recipients, comma separated' },
+        subject: { type: 'string', description: 'Subject (a reply keeps the thread subject if omitted)' },
+        body: { type: 'string', description: 'Plain-text body' },
         reply_to_id: { type: 'string', description: 'ID of the email being answered (optional)' },
         attachments: { type: 'array', items: { type: 'string' }, description: 'Paths of local files to attach (optional)' },
       },

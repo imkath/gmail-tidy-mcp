@@ -1,7 +1,7 @@
 {
   "name": "gmail-tidy-mcp",
   "mcpName": "io.github.imkath/gmail-tidy-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Organize Gmail accounts: threads, attachments, labels, filters, drafts. Never sends or deletes.",
   "type": "module",
   "bin": {
